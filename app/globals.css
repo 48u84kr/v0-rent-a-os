@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:is(.dark *));
+/* Removed @custom-variant causing build error, using standard Tailwind dark mode instead */
 
 /* Removed tw-animate-css import causing parse error, using built-in Tailwind animations instead */
 
@@ -194,7 +194,6 @@
 @keyframes exit {
   from {
     opacity: 1;
-    transform: scale(1);
   }
   to {
     opacity: 0;
