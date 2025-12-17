@@ -14,9 +14,7 @@ import {
   Smartphone,
   Pencil,
   Trash2,
-  Sparkles,
   Eye,
-  Upload,
   FileText,
   ExternalLink,
   X,
@@ -28,6 +26,8 @@ import {
   Layers,
   ChevronDown,
   ChevronRight,
+  Settings,
+  Calculator,
 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -58,6 +58,7 @@ import {
 import { createClient } from "@/lib/supabase/client"
 import { ds, cn } from "@/lib/design-system"
 import { useToast } from "@/components/ui/use-toast"
+import { PricingCalculator } from "@/components/pricing-calculator"
 
 interface DeviceModel {
   id: string
@@ -69,9 +70,18 @@ interface DeviceModel {
   created_at: string
 }
 
+interface BusinessSetting {
+  id: string
+  setting_key: string
+  setting_name: string
+  value_percent: number | null
+  value_aed: number | null
+  description: string | null
+}
+
 interface Device {
   id: string
-  name: string
+  name: string | null
   sku: string | null
   serial_number: string | null
   brand: string | null
@@ -82,6 +92,8 @@ interface Device {
   model_id: string | null
   color: string | null
   acquisition_cost_aed: number | null
+  depreciation_rate_percent: number | null
+  refurb_estimate_aed: number | null
   notes: string | null
   invoice_url: string | null
   accessories: { name: string; cost: number }[] | null
@@ -121,6 +133,15 @@ export function InventoryManagement() {
     colors: true,
   })
 
+  const [customCategory, setCustomCategory] = useState("")
+  const [showCustomCategory, setShowCustomCategory] = useState(false)
+  const [customCategoryEdit, setCustomCategoryEdit] = useState("")
+  const [showCustomCategoryEdit, setShowCustomCategoryEdit] = useState(false)
+  const [customCategoryAddDevice, setCustomCategoryAddDevice] = useState("")
+  const [showCustomCategoryAddDevice, setShowCustomCategoryAddDevice] = useState(false)
+  const [customCategoryEditModel, setCustomCategoryEditModel] = useState("")
+  const [showCustomCategoryEditModel, setShowCustomCategoryEditModel] = useState(false)
+
   const [formData, setFormData] = useState({
     name: "",
     sku: "",
@@ -133,6 +154,8 @@ export function InventoryManagement() {
     condition: "",
     status: "",
     acquisition_cost_aed: "",
+    depreciation_rate_percent: "",
+    refurb_estimate_aed: "",
     notes: "",
     accessories: [] as { name: string; cost: number }[],
   })
@@ -150,14 +173,28 @@ export function InventoryManagement() {
     condition: "",
     status: "",
     storage: "",
+    color: "",
     acquisition_cost_aed: "",
+    depreciation_rate_percent: "",
+    refurb_estimate_aed: "",
     notes: "",
   })
+
+  const [editDeviceModel, setEditDeviceModel] = useState<DeviceModel | null>(null)
 
   // Add state for view dialog and copied field
   const [viewDevice, setViewDevice] = useState<Device | null>(null)
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [businessSettings, setBusinessSettings] = useState<BusinessSetting[]>([])
+  const [isLoadingSettings, setIsLoadingSettings] = useState(false)
+  const [isSavingSettings, setIsSavingSettings] = useState(false)
+
+  const [isPricingCalculatorOpen, setIsPricingCalculatorOpen] = useState(false)
+
+  const supabase = createClient()
 
   const [invoiceFile, setInvoiceFile] = useState<File | null>(null)
   const [invoicePreview, setInvoicePreview] = useState<string | null>(null)
@@ -170,6 +207,18 @@ export function InventoryManagement() {
   const [valueSortDirection, setValueSortDirection] = useState<"none" | "asc" | "desc">("none")
 
   const [selectedModelForAdd, setSelectedModelForAdd] = useState<string>("")
+
+  const [isEditModelDialogOpen, setIsEditModelDialogOpen] = useState(false)
+  const [selectedModelForEdit, setSelectedModelForEdit] = useState<DeviceModel | null>(null)
+  const [editModelFormData, setEditModelFormData] = useState({
+    name: "",
+    brand: "",
+    category: "",
+    storageOptions: [] as string[],
+    colorOptions: [] as string[],
+  })
+  const [editModelNewStorage, setEditModelNewStorage] = useState("")
+  const [editModelNewColor, setEditModelNewColor] = useState("")
 
   const filteredDevices = devices
     .filter((device) => {
@@ -225,32 +274,11 @@ export function InventoryManagement() {
         setTotalValue(total)
       }
 
-      const { count: rentedCount, error: rentedError } = await supabase
-        .from("devices")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "rented")
-
-      if (rentedError) {
-        console.error("Error fetching rented count:", rentedError)
-      } else if (count && count > 0) {
-        const rate = ((rentedCount ?? 0) / count) * 100
-        setUtilizationRate(Math.round(rate * 10) / 10)
-      } else {
-        setUtilizationRate(0)
-      }
-
-      const { count: availableCount, error: availableError } = await supabase
-        .from("devices")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "available")
-
-      if (availableError) {
-        console.error("Error fetching available count:", availableError)
-      } else {
-        setAvailableInventory(availableCount ?? 0)
-      }
+      // Set default values for utilization rate and available inventory
+      setUtilizationRate(0)
+      setAvailableInventory(count ?? 0) // All devices are considered available
     } catch (error) {
-      console.error("Error fetching device stats:", error)
+      console.error("Error in fetchDeviceStats:", error)
     } finally {
       setIsLoading(false)
     }
@@ -287,10 +315,30 @@ export function InventoryManagement() {
     setDeviceModels(data || [])
   }
 
+  // Fetch BusinessSettings
+  const fetchBusinessSettings = async () => {
+    setIsLoadingSettings(true)
+    const supabase = createClient()
+    const { data, error } = await supabase.from("business_settings").select("*").order("id")
+
+    if (error) {
+      console.error("Error fetching business settings:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load business settings.",
+        variant: "destructive",
+      })
+    } else {
+      setBusinessSettings(data || [])
+    }
+    setIsLoadingSettings(false)
+  }
+
   useEffect(() => {
     fetchDeviceStats()
     fetchDevices()
     fetchDeviceModels()
+    fetchBusinessSettings() // Call fetchBusinessSettings
   }, [])
 
   const handleInputChange = (field: string, value: string) => {
@@ -390,6 +438,11 @@ export function InventoryManagement() {
         condition: formData.condition || null,
         storage: formData.storage || null,
         acquisition_cost_aed: formData.acquisition_cost_aed ? Number.parseFloat(formData.acquisition_cost_aed) : null,
+        // Added depreciation_rate_percent and refurb_estimate_aed to insert
+        depreciation_rate_percent: formData.depreciation_rate_percent
+          ? Number.parseFloat(formData.depreciation_rate_percent)
+          : null,
+        refurb_estimate_aed: formData.refurb_estimate_aed ? Number.parseFloat(formData.refurb_estimate_aed) : null,
         notes: formData.notes || null,
         invoice_url: invoiceUrl,
         accessories: formData.accessories.length > 0 ? formData.accessories : null,
@@ -430,6 +483,9 @@ export function InventoryManagement() {
           condition: "",
           status: "",
           acquisition_cost_aed: "",
+          // Reset depreciation and refurb fields
+          depreciation_rate_percent: "",
+          refurb_estimate_aed: "",
           notes: "",
           accessories: [],
         })
@@ -452,8 +508,16 @@ export function InventoryManagement() {
     }
   }
 
-  const handleEditClick = (device: Device) => {
+  const handleEditClick = async (device: Device) => {
     setSelectedDevice(device)
+
+    if (device.model_id) {
+      const model = deviceModels.find((m) => m.id === device.model_id)
+      setEditDeviceModel(model || null)
+    } else {
+      setEditDeviceModel(null)
+    }
+
     setEditFormData({
       name: device.name || "",
       sku: device.sku || "",
@@ -463,7 +527,10 @@ export function InventoryManagement() {
       condition: device.condition || "",
       status: device.status || "",
       storage: device.storage || "",
+      color: device.color || "",
       acquisition_cost_aed: device.acquisition_cost_aed?.toString() || "",
+      depreciation_rate_percent: device.depreciation_rate_percent?.toString() || "",
+      refurb_estimate_aed: device.refurb_estimate_aed?.toString() || "",
       notes: device.notes || "",
     })
     setIsEditDialogOpen(true)
@@ -488,6 +555,13 @@ export function InventoryManagement() {
           storage: editFormData.storage || null,
           acquisition_cost_aed: editFormData.acquisition_cost_aed
             ? Number.parseFloat(editFormData.acquisition_cost_aed)
+            : null,
+          // Added depreciation_rate_percent and refurb_estimate_aed to update
+          depreciation_rate_percent: editFormData.depreciation_rate_percent
+            ? Number.parseFloat(editFormData.depreciation_rate_percent)
+            : null,
+          refurb_estimate_aed: editFormData.refurb_estimate_aed
+            ? Number.parseFloat(editFormData.refurb_estimate_aed)
             : null,
           notes: editFormData.notes || null,
         })
@@ -738,8 +812,29 @@ export function InventoryManagement() {
   }
 
   const handleAddDeviceToModel = (modelId: string) => {
-    setSelectedModelForAdd(modelId)
-    handleModelSelect(modelId)
+    const model = deviceModels.find((m) => m.id === modelId)
+    if (model) {
+      setFormData({
+        name: model.name,
+        sku: "",
+        serial_number: "",
+        model_id: modelId,
+        storage: "",
+        color: "",
+        brand: model.brand || "",
+        category: model.category || "",
+        condition: "",
+        status: "",
+        acquisition_cost_aed: "",
+        depreciation_rate_percent: "",
+        refurb_estimate_aed: "",
+        notes: "",
+        accessories: [],
+      })
+      setSelectedModelForAdd(modelId)
+      setInvoiceFile(null)
+      setInvoicePreview(null)
+    }
     setIsDialogOpen(true)
   }
 
@@ -760,6 +855,9 @@ export function InventoryManagement() {
       condition: "",
       status: "",
       acquisition_cost_aed: "",
+      // Reset depreciation and refurb fields
+      depreciation_rate_percent: "",
+      refurb_estimate_aed: "",
       notes: "",
       accessories: [],
     })
@@ -768,8 +866,135 @@ export function InventoryManagement() {
     setInvoicePreview(null)
   }
 
+  // Updated function for handling settings open and fetch
+  const handleSettingsOpen = () => {
+    setIsSettingsOpen(true)
+    fetchBusinessSettings()
+  }
+
+  // Updated function for handling setting changes
+  const handleSettingChange = (settingKey: string, field: "value_percent" | "value_aed", value: string) => {
+    setBusinessSettings((prev) =>
+      prev.map((s) =>
+        s.setting_key === settingKey ? { ...s, [field]: value === "" ? null : Number.parseFloat(value) } : s,
+      ),
+    )
+  }
+
+  // Updated function for saving settings
+  const handleSaveSettings = async () => {
+    setIsSavingSettings(true)
+    const supabase = createClient()
+
+    try {
+      for (const setting of businessSettings) {
+        const { error } = await supabase
+          .from("business_settings")
+          .update({
+            value_percent: setting.value_percent,
+            value_aed: setting.value_aed,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("setting_key", setting.setting_key)
+
+        if (error) {
+          throw error
+        }
+      }
+
+      toast({
+        title: "Settings Saved",
+        description: "Business settings have been updated successfully.",
+      })
+      setIsSettingsOpen(false)
+    } catch (error) {
+      console.error("Error saving settings:", error)
+      toast({
+        title: "Error",
+        description: "Failed to save settings. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsSavingSettings(false)
+    }
+  }
+
+  const handleEditModelClick = (model: DeviceModel) => {
+    setSelectedModelForEdit(model)
+    setEditModelFormData({
+      name: model.name,
+      brand: model.brand || "",
+      category: model.category || "",
+      storageOptions: model.storage_options || [],
+      colorOptions: model.color_options || [],
+    })
+    setIsEditModelDialogOpen(true)
+  }
+
+  const handleEditModelSubmit = async () => {
+    if (!selectedModelForEdit) return
+
+    if (!editModelFormData.name.trim()) {
+      toast({
+        title: "Model Name Required",
+        description: "Please enter a model name.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsSubmittingModel(true)
+    const supabase = createClient()
+
+    try {
+      const { error } = await supabase
+        .from("device_models")
+        .update({
+          name: editModelFormData.name,
+          brand: editModelFormData.brand || null,
+          category: editModelFormData.category || null,
+          storage_options: editModelFormData.storageOptions,
+          color_options: editModelFormData.colorOptions,
+        })
+        .eq("id", selectedModelForEdit.id)
+
+      if (error) {
+        console.error("Error updating device model:", error)
+        toast({
+          title: "Update Failed",
+          description: "Failed to update device model. Please try again.",
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Model Updated",
+          description: `${editModelFormData.name} has been successfully updated.`,
+        })
+        setIsEditModelDialogOpen(false)
+        setSelectedModelForEdit(null)
+        setEditModelFormData({
+          name: "",
+          brand: "",
+          category: "",
+          storageOptions: [],
+          colorOptions: [],
+        })
+        fetchDeviceModels()
+      }
+    } catch (error) {
+      console.error("Error:", error)
+      toast({
+        title: "Unexpected Error",
+        description: "An unexpected error occurred.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsSubmittingModel(false)
+    }
+  }
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8 pb-8">
       {/* Header */}
       {/* Updated header layout and replaced Export Report with Add New Model */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -778,6 +1003,142 @@ export function InventoryManagement() {
           <p className="text-muted-foreground">Track stock levels and warehouse operations</p>
         </div>
         <div className="flex gap-3">
+          {/* Pricing Calculator Dialog */}
+          <Dialog
+            open={isPricingCalculatorOpen}
+            onOpenChange={(open) => {
+              setIsPricingCalculatorOpen(open)
+            }}
+          >
+            <DialogTrigger asChild>
+              <Button variant="outline" className={cn(ds.button.secondary, "relative overflow-hidden group")}>
+                <Calculator className="w-4 h-4 mr-2" />
+                Pricing Calculator
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-semibold">Pricing Calculator</DialogTitle>
+                <DialogDescription>
+                  Calculate rental pricing based on device cost and business settings.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="py-4">
+                <PricingCalculator />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsPricingCalculatorOpen(false)} className="rounded-xl">
+                  Close
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Settings Dialog */}
+          <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+            <DialogTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(ds.button.secondary, "relative overflow-hidden group")}
+                onClick={handleSettingsOpen}
+              >
+                <Settings className="w-4 h-4 mr-2" />
+                Settings
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-semibold">Business Settings</DialogTitle>
+                <DialogDescription>
+                  Configure your business-specific settings for inventory calculations.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-6 py-4">
+                {isLoadingSettings ? (
+                  <div className="flex justify-center items-center py-10">
+                    <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                  </div>
+                ) : businessSettings.length === 0 ? (
+                  <div className="text-center text-muted-foreground py-10">
+                    No settings found. Please check your database configuration.
+                  </div>
+                ) : (
+                  businessSettings.map((setting) => (
+                    <div key={setting.id} className="space-y-2">
+                      <Label htmlFor={`setting-${setting.id}`} className="text-sm font-medium">
+                        {setting.setting_name}
+                      </Label>
+                      {setting.description && <p className="text-xs text-muted-foreground">{setting.description}</p>}
+                      <div className="flex items-center gap-2">
+                        {/* Investor Profit Rate, Payment Gateway Fee, Risk Provision, Target Margin - show % input */}
+                        {(setting.setting_key === "investor_profit_rate" ||
+                          setting.setting_key === "payment_gateway_fee" ||
+                          setting.setting_key === "risk_provision" ||
+                          setting.setting_key === "target_margin") && (
+                          <>
+                            <Input
+                              id={`setting-${setting.id}`}
+                              type="number"
+                              placeholder="e.g., 15.00"
+                              className="rounded-xl flex-1"
+                              value={setting.value_percent ?? ""}
+                              onChange={(e) =>
+                                handleSettingChange(setting.setting_key, "value_percent", e.target.value)
+                              }
+                              min="0"
+                              max="100"
+                              step="0.01"
+                            />
+                            <div className="flex items-center justify-center px-3 bg-muted border border-l-0 border-input rounded-r-xl text-sm text-muted-foreground h-9">
+                              %
+                            </div>
+                          </>
+                        )}
+                        {/* Logistics Buffer - show AED input */}
+                        {setting.setting_key === "logistics_buffer" && (
+                          <>
+                            <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground h-9">
+                              AED
+                            </div>
+                            <Input
+                              id={`setting-${setting.id}`}
+                              type="number"
+                              placeholder="e.g., 500.00"
+                              className="rounded-l-none rounded-r-xl flex-1"
+                              value={setting.value_aed ?? ""}
+                              onChange={(e) => handleSettingChange(setting.setting_key, "value_aed", e.target.value)}
+                              min="0"
+                              step="0.01"
+                            />
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsSettingsOpen(false)} className="rounded-xl">
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleSaveSettings}
+                  disabled={isSavingSettings || businessSettings.length === 0}
+                  className="rounded-xl"
+                >
+                  {isSavingSettings ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save Settings"
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={isModelDialogOpen} onOpenChange={setIsModelDialogOpen}>
             <DialogTrigger asChild>
               <Button
@@ -825,8 +1186,17 @@ export function InventoryManagement() {
                   <div className="space-y-2">
                     <Label htmlFor="model-category">Category *</Label>
                     <Select
-                      value={modelFormData.category}
-                      onValueChange={(value) => setModelFormData({ ...modelFormData, category: value })}
+                      value={showCustomCategory ? "custom" : modelFormData.category}
+                      onValueChange={(value) => {
+                        if (value === "custom") {
+                          setShowCustomCategory(true)
+                          setModelFormData({ ...modelFormData, category: "" })
+                        } else {
+                          setShowCustomCategory(false)
+                          setCustomCategory("")
+                          setModelFormData({ ...modelFormData, category: value })
+                        }
+                      }}
                     >
                       <SelectTrigger className="rounded-xl">
                         <SelectValue placeholder="Select category" />
@@ -835,10 +1205,23 @@ export function InventoryManagement() {
                         <SelectItem value="smartphone">Smartphone</SelectItem>
                         <SelectItem value="tablet">Tablet</SelectItem>
                         <SelectItem value="laptop">Laptop</SelectItem>
+                        <SelectItem value="gaming-console">Gaming Console</SelectItem>
                         <SelectItem value="smartwatch">Smartwatch</SelectItem>
                         <SelectItem value="accessory">Accessory</SelectItem>
+                        <SelectItem value="custom">Custom Category...</SelectItem>
                       </SelectContent>
                     </Select>
+                    {showCustomCategory && (
+                      <Input
+                        placeholder="Enter custom category"
+                        className="rounded-xl mt-2"
+                        value={customCategory}
+                        onChange={(e) => {
+                          setCustomCategory(e.target.value)
+                          setModelFormData({ ...modelFormData, category: e.target.value })
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
 
@@ -979,422 +1362,6 @@ export function InventoryManagement() {
                     </>
                   ) : (
                     "Add Model"
-                  )}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-
-          {/* Add Item Dialog */}
-          <Dialog open={isDialogOpen} onOpenChange={handleDialogClose}>
-            <DialogTrigger asChild>
-              {/* Updated Button appearance and added Sparkles icon */}
-              <Button className={cn(ds.button.primary, "group relative overflow-hidden")}>
-                <Plus className="w-4 h-4 mr-2" />
-                Add Item
-                <Sparkles className="w-4 h-4 ml-2 opacity-0 group-hover:opacity-100 transition-all duration-300 group-hover:rotate-12" />
-              </Button>
-            </DialogTrigger>
-            <DialogContent className={cn(ds.dialog.content, "sm:max-w-[600px] max-h-[90vh] overflow-y-auto")}>
-              <DialogHeader>
-                <DialogTitle className="text-xl font-semibold">Add New Device</DialogTitle>
-                <DialogDescription>
-                  {selectedModelForAdd && (
-                    <span className="text-primary font-medium">
-                      Adding to: {deviceModels.find((m) => m.id === selectedModelForAdd)?.name}
-                    </span>
-                  )}
-                  {!selectedModelForAdd && "Fill in the device details below. Click save when you're done."}
-                </DialogDescription>
-              </DialogHeader>
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  handleSubmit()
-                }}
-                className="space-y-6"
-              >
-                <div className="space-y-4">
-                  <h4 className="text-sm font-medium text-muted-foreground">Device Model</h4>
-                  <div className="space-y-2">
-                    <Label htmlFor="model">Select Model *</Label>
-                    {deviceModels.length === 0 ? (
-                      <div className="p-4 border border-dashed rounded-xl text-center text-sm text-muted-foreground">
-                        No models available. Click "Add New Model" to create one first.
-                      </div>
-                    ) : (
-                      <Select value={selectedModelId || selectedModelForAdd} onValueChange={handleModelSelect}>
-                        <SelectTrigger className="rounded-xl">
-                          <SelectValue placeholder="Select a device model" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {deviceModels.map((model) => (
-                            <SelectItem key={model.id} value={model.id}>
-                              {model.name} ({model.brand})
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
-                </div>
-
-                {(selectedModelId || selectedModelForAdd) && (
-                  <>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="storage">Storage *</Label>
-                        <Select
-                          value={formData.storage}
-                          onValueChange={(value) => setFormData({ ...formData, storage: value })}
-                        >
-                          <SelectTrigger className="rounded-xl">
-                            <SelectValue placeholder="Select storage" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {deviceModels
-                              .find((m) => m.id === (selectedModelId || selectedModelForAdd))
-                              ?.storage_options.map((storage) => (
-                                <SelectItem key={storage} value={storage}>
-                                  {storage}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="color">Color *</Label>
-                        <Select
-                          value={formData.color}
-                          onValueChange={(value) => setFormData({ ...formData, color: value })}
-                        >
-                          <SelectTrigger className="rounded-xl">
-                            <SelectValue placeholder="Select color" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {deviceModels
-                              .find((m) => m.id === (selectedModelId || selectedModelForAdd))
-                              ?.color_options.map((color) => (
-                                <SelectItem key={color} value={color}>
-                                  {color}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-
-                    {/* Basic Information */}
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-medium text-muted-foreground">Basic Information</h4>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="name">Device Name *</Label>
-                          <Input
-                            id="name"
-                            placeholder="e.g., iPhone 15 Pro"
-                            className="rounded-xl"
-                            value={formData.name}
-                            onChange={(e) => handleInputChange("name", e.target.value)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="sku">SKU</Label>
-                          <Input
-                            id="sku"
-                            placeholder="e.g., IPH-15P-256"
-                            className="rounded-xl"
-                            value={formData.sku}
-                            onChange={(e) => handleInputChange("sku", e.target.value)}
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="serial_number">Serial Number</Label>
-                          <Input
-                            id="serial_number"
-                            placeholder="e.g., SN123456789"
-                            className="rounded-xl"
-                            value={formData.serial_number}
-                            onChange={(e) => handleInputChange("serial_number", e.target.value)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="brand">Brand</Label>
-                          <Input
-                            id="brand"
-                            placeholder="e.g., Apple"
-                            className="rounded-xl"
-                            value={formData.brand}
-                            onChange={(e) => handleInputChange("brand", e.target.value)}
-                          />
-                        </div>
-                      </div>
-                      {/* Removed existing storage select */}
-                    </div>
-
-                    {/* Category & Condition */}
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-medium text-muted-foreground">Category & Condition</h4>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="category">Category</Label>
-                          <Select
-                            value={formData.category}
-                            onValueChange={(value) => handleInputChange("category", value)}
-                          >
-                            <SelectTrigger className="rounded-xl">
-                              <SelectValue placeholder="Select category" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="smartphone">Smartphone</SelectItem>
-                              <SelectItem value="tablet">Tablet</SelectItem>
-                              <SelectItem value="laptop">Laptop</SelectItem>
-                              <SelectItem value="wearable">Wearable</SelectItem>
-                              <SelectItem value="accessory">Accessory</SelectItem>
-                              <SelectItem value="other">Other</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="condition">Condition</Label>
-                          <Select
-                            value={formData.condition}
-                            onValueChange={(value) => handleInputChange("condition", value)}
-                          >
-                            <SelectTrigger className="rounded-xl">
-                              <SelectValue placeholder="Select condition" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="new">New</SelectItem>
-                              <SelectItem value="like_new">Like New</SelectItem>
-                              <SelectItem value="good">Good</SelectItem>
-                              <SelectItem value="fair">Fair</SelectItem>
-                              <SelectItem value="poor">Poor</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Pricing */}
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-medium text-muted-foreground">Pricing</h4>
-                      <div className="space-y-2">
-                        <Label htmlFor="acquisition_cost_aed">Device Cost</Label>
-                        <div className="flex">
-                          <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground">
-                            AED
-                          </div>
-                          <Input
-                            id="acquisition_cost_aed"
-                            type="number"
-                            placeholder="e.g., 4000"
-                            className="rounded-l-none rounded-r-xl"
-                            value={formData.acquisition_cost_aed}
-                            onChange={(e) => handleInputChange("acquisition_cost_aed", e.target.value)}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Accessories */}
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-medium text-muted-foreground">Accessories</h4>
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2">
-                          <Select
-                            value={newAccessory.name}
-                            onValueChange={(value) => setNewAccessory((prev) => ({ ...prev, name: value }))}
-                          >
-                            <SelectTrigger className="rounded-xl flex-1">
-                              <SelectValue placeholder="Select accessory type" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="Screen Protector">Screen Protector</SelectItem>
-                              <SelectItem value="Body Protector">Body Protector</SelectItem>
-                              <SelectItem value="Case">Case</SelectItem>
-                              <SelectItem value="Charger">Charger</SelectItem>
-                              <SelectItem value="Earphones">Earphones</SelectItem>
-                              <SelectItem value="Other">Other</SelectItem>
-                            </SelectContent>
-                          </Select>
-
-                          <div className="flex items-center">
-                            <span className="inline-flex items-center px-2.5 h-9 text-xs font-medium text-muted-foreground bg-muted border border-r-0 border-input rounded-l-xl">
-                              AED
-                            </span>
-                            <Input
-                              type="number"
-                              placeholder="0.00"
-                              className="rounded-l-none rounded-r-xl w-[70px] text-sm h-9"
-                              value={newAccessory.cost}
-                              onChange={(e) => setNewAccessory((prev) => ({ ...prev, cost: e.target.value }))}
-                              min="0"
-                              step="0.01"
-                            />
-                          </div>
-
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            className="rounded-xl bg-transparent h-9 w-9 shrink-0"
-                            onClick={() => {
-                              if (newAccessory.name && newAccessory.cost) {
-                                const cost = Number.parseFloat(newAccessory.cost)
-                                if (!isNaN(cost) && cost > 0) {
-                                  // Check if accessory already exists
-                                  if (!formData.accessories.some((acc) => acc.name === newAccessory.name)) {
-                                    setFormData((prev) => ({
-                                      ...prev,
-                                      accessories: [...prev.accessories, { name: newAccessory.name, cost }],
-                                    }))
-                                    setNewAccessory({ name: "", cost: "" })
-                                  }
-                                }
-                              }
-                            }}
-                            disabled={
-                              !newAccessory.name || !newAccessory.cost || Number.parseFloat(newAccessory.cost) <= 0
-                            }
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
-                        </div>
-
-                        {formData.accessories.length > 0 && (
-                          <div className="space-y-2">
-                            {formData.accessories.map((accessory, index) => (
-                              <div
-                                key={index}
-                                className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <div className="w-2 h-2 rounded-full bg-primary" />
-                                  <span className="text-sm font-medium">{accessory.name}</span>
-                                </div>
-                                <div className="flex items-center gap-3">
-                                  <span className="text-sm text-muted-foreground">AED {accessory.cost.toFixed(2)}</span>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-7 w-7 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                    onClick={() => {
-                                      setFormData((prev) => ({
-                                        ...prev,
-                                        accessories: prev.accessories.filter((_, i) => i !== index),
-                                      }))
-                                    }}
-                                  >
-                                    <X className="h-4 w-4" />
-                                  </Button>
-                                </div>
-                              </div>
-                            ))}
-                            <div className="flex items-center justify-between p-3 rounded-lg border border-primary/20 bg-primary/5">
-                              <span className="text-sm font-semibold">Total Accessories Cost</span>
-                              <span className="text-sm font-bold text-primary">
-                                AED {formData.accessories.reduce((sum, acc) => sum + acc.cost, 0).toFixed(2)}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Invoice Upload */}
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-medium text-muted-foreground">Invoice</h4>
-                      <div
-                        className={`flex items-center justify-center w-full border-2 border-dashed rounded-lg p-4 ${
-                          isDraggingInvoice ? "border-blue-500 bg-blue-50" : "border-gray-300"
-                        }`}
-                        onDragOver={(e) => {
-                          e.preventDefault()
-                          setIsDraggingInvoice(true)
-                        }}
-                        onDragLeave={() => setIsDraggingInvoice(false)}
-                        onDrop={handleInvoiceDrop}
-                      >
-                        <label
-                          htmlFor="invoice-upload"
-                          className="flex flex-col items-center justify-center w-full h-full cursor-pointer"
-                        >
-                          <Upload className="w-8 h-8 text-gray-500 mb-2" />
-                          <div className="text-sm text-gray-500 dark:text-gray-400">
-                            Drag & drop your invoice (JPG, PNG, PDF) or click to select
-                          </div>
-                        </label>
-                        <Input
-                          id="invoice-upload"
-                          type="file"
-                          className="hidden"
-                          accept="image/*,.pdf"
-                          onChange={handleInvoiceSelect}
-                        />
-                      </div>
-                      {invoiceFile && (
-                        <div className="flex items-center justify-between mt-2 p-2 rounded-md bg-gray-100 dark:bg-gray-800">
-                          <div className="flex items-center gap-2">
-                            {invoicePreview ? (
-                              <img
-                                src={invoicePreview || "/placeholder.svg"}
-                                alt="Invoice Preview"
-                                className="w-10 h-10 rounded-md object-cover"
-                              />
-                            ) : (
-                              <FileText className="w-6 h-6 text-blue-500" />
-                            )}
-                            <span className="text-sm truncate">{invoiceFile.name}</span>
-                          </div>
-                          <Button variant="ghost" size="icon" onClick={removeInvoice}>
-                            <X className="w-4 h-4 text-destructive" />
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Notes */}
-                    <div className="space-y-2">
-                      <Label htmlFor="notes">Notes</Label>
-                      <Textarea
-                        id="notes"
-                        placeholder="Additional notes about the device..."
-                        className="rounded-xl min-h-[80px]"
-                        value={formData.notes}
-                        onChange={(e) => handleEditInputChange("notes", e.target.value)}
-                      />
-                    </div>
-                  </>
-                )}
-              </form>
-              <DialogFooter>
-                <Button variant="outline" onClick={handleDialogClose} className="rounded-xl bg-transparent">
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleSubmit}
-                  disabled={
-                    isSubmitting ||
-                    !formData.name ||
-                    !invoiceFile ||
-                    !formData.storage ||
-                    !formData.color ||
-                    !(selectedModelId || selectedModelForAdd)
-                  }
-                  className="rounded-xl"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    "Save Device"
                   )}
                 </Button>
               </DialogFooter>
@@ -1598,9 +1565,19 @@ export function InventoryManagement() {
                           </p>
                         </div>
                       </div>
-                      <Badge variant="outline" className="rounded-lg">
-                        {modelDevices.length} {modelDevices.length === 1 ? "device" : "devices"}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 rounded-lg"
+                          onClick={() => handleEditModelClick(model)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Badge variant="outline" className="rounded-lg">
+                          {modelDevices.length} {modelDevices.length === 1 ? "device" : "devices"}
+                        </Badge>
+                      </div>
                     </div>
 
                     {/* Model Variants Info */}
@@ -1908,6 +1885,24 @@ export function InventoryManagement() {
                       : "N/A"}
                   </p>
                 </div>
+                {/* Added Depreciation Rate field in View Dialog */}
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Depreciation Rate</Label>
+                  <p className="font-medium text-sm">
+                    {viewDevice.depreciation_rate_percent !== null && viewDevice.depreciation_rate_percent !== undefined
+                      ? `${viewDevice.depreciation_rate_percent.toFixed(2)}%`
+                      : "N/A"}
+                  </p>
+                </div>
+                {/* Added Refurb Estimate field in View Dialog */}
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Refurb Estimate</Label>
+                  <p className="font-medium text-sm">
+                    {viewDevice.refurb_estimate_aed !== null && viewDevice.refurb_estimate_aed !== undefined
+                      ? `AED ${viewDevice.refurb_estimate_aed.toLocaleString()}`
+                      : "N/A"}
+                  </p>
+                </div>
               </div>
 
               {/* Accessories */}
@@ -2037,20 +2032,62 @@ export function InventoryManagement() {
                   />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-storage">Storage</Label>
-                <Select value={editFormData.storage} onValueChange={(value) => handleEditInputChange("storage", value)}>
-                  <SelectTrigger className="rounded-xl transition-all duration-300 focus:ring-2 focus:ring-blue-500/20">
-                    <SelectValue placeholder="Select storage" />
-                  </SelectTrigger>
-                  <SelectContent className="rounded-xl">
-                    <SelectItem value="128GB">128GB</SelectItem>
-                    <SelectItem value="256GB">256GB</SelectItem>
-                    <SelectItem value="512GB">512GB</SelectItem>
-                    <SelectItem value="1TB">1TB</SelectItem>
-                    <SelectItem value="2TB">2TB</SelectItem>
-                  </SelectContent>
-                </Select>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="edit-storage">Storage</Label>
+                  <Select
+                    value={editFormData.storage}
+                    onValueChange={(value) => handleEditInputChange("storage", value)}
+                  >
+                    <SelectTrigger className="rounded-xl transition-all duration-300 focus:ring-2 focus:ring-blue-500/20">
+                      <SelectValue placeholder="Select storage" />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-xl">
+                      {editDeviceModel &&
+                      editDeviceModel.storage_options &&
+                      editDeviceModel.storage_options.length > 0 ? (
+                        editDeviceModel.storage_options.map((option) => (
+                          <SelectItem key={option} value={option}>
+                            {option}
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <>
+                          <SelectItem value="128GB">128GB</SelectItem>
+                          <SelectItem value="256GB">256GB</SelectItem>
+                          <SelectItem value="512GB">512GB</SelectItem>
+                          <SelectItem value="1TB">1TB</SelectItem>
+                          <SelectItem value="2TB">2TB</SelectItem>
+                        </>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-color">Color</Label>
+                  <Select value={editFormData.color} onValueChange={(value) => handleEditInputChange("color", value)}>
+                    <SelectTrigger className="rounded-xl transition-all duration-300 focus:ring-2 focus:ring-blue-500/20">
+                      <SelectValue placeholder="Select color" />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-xl">
+                      {editDeviceModel && editDeviceModel.color_options && editDeviceModel.color_options.length > 0 ? (
+                        editDeviceModel.color_options.map((option) => (
+                          <SelectItem key={option} value={option}>
+                            {option}
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <>
+                          <SelectItem value="Black">Black</SelectItem>
+                          <SelectItem value="White">White</SelectItem>
+                          <SelectItem value="Blue">Blue</SelectItem>
+                          <SelectItem value="Gold">Gold</SelectItem>
+                          <SelectItem value="Silver">Silver</SelectItem>
+                        </>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </div>
 
@@ -2061,8 +2098,17 @@ export function InventoryManagement() {
                 <div className="space-y-2">
                   <Label htmlFor="edit-category">Category</Label>
                   <Select
-                    value={editFormData.category}
-                    onValueChange={(value) => handleEditInputChange("category", value)}
+                    value={showCustomCategoryEdit ? "custom" : editFormData.category}
+                    onValueChange={(value) => {
+                      if (value === "custom") {
+                        setShowCustomCategoryEdit(true)
+                        setEditModelFormData((prev) => ({ ...prev, category: "" }))
+                      } else {
+                        setShowCustomCategoryEdit(false)
+                        setCustomCategoryEdit("")
+                        setEditModelFormData((prev) => ({ ...prev, category: value }))
+                      }
+                    }}
                   >
                     <SelectTrigger className="rounded-xl transition-all duration-300 focus:ring-2 focus:ring-blue-500/20">
                       <SelectValue placeholder="Select category" />
@@ -2074,8 +2120,20 @@ export function InventoryManagement() {
                       <SelectItem value="wearable">Wearable</SelectItem>
                       <SelectItem value="accessory">Accessory</SelectItem>
                       <SelectItem value="other">Other</SelectItem>
+                      <SelectItem value="custom">Custom Category...</SelectItem>
                     </SelectContent>
                   </Select>
+                  {showCustomCategoryEdit && (
+                    <Input
+                      placeholder="Enter custom category"
+                      className="rounded-xl mt-2"
+                      value={customCategoryEdit}
+                      onChange={(e) => {
+                        setCustomCategoryEdit(e.target.value)
+                        setEditModelFormData((prev) => ({ ...prev, category: e.target.value }))
+                      }}
+                    />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="edit-condition">Condition</Label>
@@ -2126,6 +2184,45 @@ export function InventoryManagement() {
                   value={editFormData.acquisition_cost_aed}
                   onChange={(e) => handleEditInputChange("acquisition_cost_aed", e.target.value)}
                 />
+              </div>
+              {/* Added Depreciation Rate field in Edit Dialog */}
+              <div className="space-y-2">
+                <Label htmlFor="edit-depreciation_rate_percent">Depreciation Rate</Label>
+                <div className="flex">
+                  <Input
+                    id="edit-depreciation_rate_percent"
+                    type="number"
+                    placeholder="e.g., 15.5"
+                    className="rounded-l-xl rounded-r-none"
+                    value={editFormData.depreciation_rate_percent}
+                    onChange={(e) => handleEditInputChange("depreciation_rate_percent", e.target.value)}
+                    step="0.01"
+                    min="0"
+                    max="100"
+                  />
+                  <div className="flex items-center justify-center px-3 bg-muted border border-l-0 border-input rounded-r-xl text-sm text-muted-foreground">
+                    %
+                  </div>
+                </div>
+              </div>
+              {/* Added Refurb Estimate field in Edit Dialog */}
+              <div className="space-y-2">
+                <Label htmlFor="edit-refurb_estimate_aed">Refurb Estimate</Label>
+                <div className="flex">
+                  <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground">
+                    AED
+                  </div>
+                  <Input
+                    id="edit-refurb_estimate_aed"
+                    type="number"
+                    placeholder="e.g., 500"
+                    className="rounded-l-none rounded-r-xl"
+                    value={editFormData.refurb_estimate_aed}
+                    onChange={(e) => handleEditInputChange("refurb_estimate_aed", e.target.value)}
+                    step="0.01"
+                    min="0"
+                  />
+                </div>
               </div>
             </div>
 
@@ -2198,6 +2295,687 @@ export function InventoryManagement() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={isEditModelDialogOpen} onOpenChange={setIsEditModelDialogOpen}>
+        <DialogContent className={cn(ds.dialog.content, "sm:max-w-[700px] max-h-[90vh] overflow-y-auto")}>
+          <DialogHeader>
+            <DialogTitle className="text-xl font-semibold">Edit Device Model</DialogTitle>
+            <DialogDescription>
+              Update the model configuration. Changes will be reflected in the device list.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-6 py-4">
+            {/* Model Name */}
+            <div className="space-y-2">
+              <Label htmlFor="edit-model-name">Model Name *</Label>
+              <Input
+                id="edit-model-name"
+                placeholder="e.g., iPhone 17 Pro Max"
+                value={editModelFormData.name}
+                onChange={(e) => setEditModelFormData((prev) => ({ ...prev, name: e.target.value }))}
+                className="rounded-xl"
+              />
+            </div>
+
+            {/* Brand and Category */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-model-brand">Brand</Label>
+                <Input
+                  id="edit-model-brand"
+                  placeholder="e.g., Apple"
+                  value={editModelFormData.brand}
+                  onChange={(e) => setEditModelFormData((prev) => ({ ...prev, brand: e.target.value }))}
+                  className="rounded-xl"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="edit-model-category">Category</Label>
+                <Select
+                  value={showCustomCategoryEditModel ? "custom" : editModelFormData.category}
+                  onValueChange={(value) => {
+                    if (value === "custom") {
+                      setShowCustomCategoryEditModel(true)
+                      setEditModelFormData((prev) => ({ ...prev, category: "" }))
+                    } else {
+                      setShowCustomCategoryEditModel(false)
+                      setCustomCategoryEditModel("")
+                      setEditModelFormData((prev) => ({ ...prev, category: value }))
+                    }
+                  }}
+                >
+                  <SelectTrigger className="rounded-xl">
+                    <SelectValue placeholder="Select category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Smartphone">Smartphone</SelectItem>
+                    <SelectItem value="Tablet">Tablet</SelectItem>
+                    <SelectItem value="Laptop">Laptop</SelectItem>
+                    <SelectItem value="Gaming Console">Gaming Console</SelectItem>
+                    <SelectItem value="Smartwatch">Smartwatch</SelectItem>
+                    <SelectItem value="custom">Custom Category...</SelectItem>
+                  </SelectContent>
+                </Select>
+                {showCustomCategoryEditModel && (
+                  <Input
+                    placeholder="Enter custom category"
+                    className="rounded-xl mt-2"
+                    value={customCategoryEditModel}
+                    onChange={(e) => {
+                      setCustomCategoryEditModel(e.target.value)
+                      setEditModelFormData((prev) => ({ ...prev, category: e.target.value }))
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Storage Options */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label>Storage Options</Label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExpandedSections((prev) => ({ ...prev, storage: !prev.storage }))}
+                  className="h-8 text-sm"
+                >
+                  {expandedSections.storage ? (
+                    <>
+                      <ChevronDown className="h-4 w-4 mr-1" />
+                      Hide
+                    </>
+                  ) : (
+                    <>
+                      <ChevronRight className="h-4 w-4 mr-1" />
+                      Show
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {expandedSections.storage && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="e.g., 128GB, 256GB"
+                      value={editModelNewStorage}
+                      onChange={(e) => setEditModelNewStorage(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && editModelNewStorage.trim()) {
+                          e.preventDefault()
+                          if (!editModelFormData.storageOptions.includes(editModelNewStorage.trim())) {
+                            setEditModelFormData((prev) => ({
+                              ...prev,
+                              storageOptions: [...prev.storageOptions, editModelNewStorage.trim()],
+                            }))
+                            setEditModelNewStorage("")
+                          }
+                        }
+                      }}
+                      className="rounded-xl"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        if (
+                          editModelNewStorage.trim() &&
+                          !editModelFormData.storageOptions.includes(editModelNewStorage.trim())
+                        ) {
+                          setEditModelFormData((prev) => ({
+                            ...prev,
+                            storageOptions: [...prev.storageOptions, editModelNewStorage.trim()],
+                          }))
+                          setEditModelNewStorage("")
+                        }
+                      }}
+                      className="rounded-xl"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+
+                  {editModelFormData.storageOptions.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {editModelFormData.storageOptions.map((storage, idx) => (
+                        <Badge key={idx} variant="secondary" className="rounded-lg pr-1">
+                          {storage}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-4 w-4 ml-1 hover:bg-transparent"
+                            onClick={() => {
+                              setEditModelFormData((prev) => ({
+                                ...prev,
+                                storageOptions: prev.storageOptions.filter((_, i) => i !== idx),
+                              }))
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Color Options */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label>Color Options</Label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExpandedSections((prev) => ({ ...prev, colors: !prev.colors }))}
+                  className="h-8 text-sm"
+                >
+                  {expandedSections.colors ? (
+                    <>
+                      <ChevronDown className="h-4 w-4 mr-1" />
+                      Hide
+                    </>
+                  ) : (
+                    <>
+                      <ChevronRight className="h-4 w-4 mr-1" />
+                      Show
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {expandedSections.colors && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="e.g., Black, White, Blue"
+                      value={editModelNewColor}
+                      onChange={(e) => setEditModelNewColor(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && editModelNewColor.trim()) {
+                          e.preventDefault()
+                          if (!editModelFormData.colorOptions.includes(editModelNewColor.trim())) {
+                            setEditModelFormData((prev) => ({
+                              ...prev,
+                              colorOptions: [...prev.colorOptions, editModelNewColor.trim()],
+                            }))
+                            setEditModelNewColor("")
+                          }
+                        }
+                      }}
+                      className="rounded-xl"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        if (
+                          editModelNewColor.trim() &&
+                          !editModelFormData.colorOptions.includes(editModelNewColor.trim())
+                        ) {
+                          setEditModelFormData((prev) => ({
+                            ...prev,
+                            colorOptions: [...prev.colorOptions, editModelNewColor.trim()],
+                          }))
+                          setEditModelNewColor("")
+                        }
+                      }}
+                      className="rounded-xl"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+
+                  {editModelFormData.colorOptions.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {editModelFormData.colorOptions.map((color, idx) => (
+                        <Badge key={idx} variant="secondary" className="rounded-lg pr-1">
+                          {color}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-4 w-4 ml-1 hover:bg-transparent"
+                            onClick={() => {
+                              setEditModelFormData((prev) => ({
+                                ...prev,
+                                colorOptions: prev.colorOptions.filter((_, i) => i !== idx),
+                              }))
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditModelDialogOpen(false)} className="rounded-xl">
+              Cancel
+            </Button>
+            <Button onClick={handleEditModelSubmit} disabled={isSubmittingModel} className={cn(ds.button.primary)}>
+              {isSubmittingModel ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Updating...
+                </>
+              ) : (
+                "Update Model"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Device Dialog */}
+      <Dialog open={isDialogOpen} onOpenChange={handleDialogClose}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-semibold">Add Device</DialogTitle>
+            <DialogDescription>
+              {selectedModelForAdd && deviceModels.find((m) => m.id === selectedModelForAdd)
+                ? `Adding a new device to model: ${deviceModels.find((m) => m.id === selectedModelForAdd)?.name}`
+                : "Add a new device to your inventory"}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-6 py-4">
+            {/* Model Information */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Device Model</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Model *</Label>
+                  <Select
+                    value={formData.model_id}
+                    onValueChange={(value) => {
+                      const model = deviceModels.find((m) => m.id === value)
+                      if (model) {
+                        setFormData({
+                          ...formData,
+                          model_id: value,
+                          name: model.name,
+                          brand: model.brand || "",
+                          category: model.category || "",
+                          storage: "",
+                          color: "",
+                        })
+                        setSelectedModelForAdd(value)
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="rounded-xl">
+                      <SelectValue placeholder="Select model" />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-xl">
+                      {deviceModels.map((model) => (
+                        <SelectItem key={model.id} value={model.id}>
+                          {model.name} ({model.brand})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Device Name</Label>
+                  <Input
+                    placeholder="e.g., iPhone 15 Pro Max"
+                    className="rounded-xl"
+                    value={formData.name}
+                    onChange={(e) => handleInputChange("name", e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Variant Selection */}
+            {formData.model_id &&
+              (() => {
+                const selectedModel = deviceModels.find((m) => m.id === formData.model_id)
+                return selectedModel ? (
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-medium text-muted-foreground">Device Variants</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      {selectedModel.storage_options && selectedModel.storage_options.length > 0 && (
+                        <div className="space-y-2">
+                          <Label>Storage</Label>
+                          <Select
+                            value={formData.storage}
+                            onValueChange={(value) => handleInputChange("storage", value)}
+                          >
+                            <SelectTrigger className="rounded-xl">
+                              <SelectValue placeholder="Select storage" />
+                            </SelectTrigger>
+                            <SelectContent className="rounded-xl">
+                              {selectedModel.storage_options.map((storage) => (
+                                <SelectItem key={storage} value={storage}>
+                                  {storage}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                      {selectedModel.color_options && selectedModel.color_options.length > 0 && (
+                        <div className="space-y-2">
+                          <Label>Color</Label>
+                          <Select value={formData.color} onValueChange={(value) => handleInputChange("color", value)}>
+                            <SelectTrigger className="rounded-xl">
+                              <SelectValue placeholder="Select color" />
+                            </SelectTrigger>
+                            <SelectContent className="rounded-xl">
+                              {selectedModel.color_options.map((color) => (
+                                <SelectItem key={color} value={color}>
+                                  {color}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null
+              })()}
+
+            {/* Device Details */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Device Details</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>SKU</Label>
+                  <Input
+                    placeholder="e.g., IPH-15PM-001"
+                    className="rounded-xl"
+                    value={formData.sku}
+                    onChange={(e) => handleInputChange("sku", e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Serial Number</Label>
+                  <Input
+                    placeholder="e.g., ABC123XYZ456"
+                    className="rounded-xl"
+                    value={formData.serial_number}
+                    onChange={(e) => handleInputChange("serial_number", e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Condition *</Label>
+                  <Select value={formData.condition} onValueChange={(value) => handleInputChange("condition", value)}>
+                    <SelectTrigger className="rounded-xl">
+                      <SelectValue placeholder="Select condition" />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-xl">
+                      <SelectItem value="new">New</SelectItem>
+                      <SelectItem value="like_new">Like New</SelectItem>
+                      <SelectItem value="good">Good</SelectItem>
+                      <SelectItem value="fair">Fair</SelectItem>
+                      <SelectItem value="poor">Poor</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </div>
+
+            {/* Pricing */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Pricing</h4>
+              <div className="space-y-2">
+                <Label htmlFor="acquisition_cost_aed">Device Cost</Label>
+                <div className="flex">
+                  <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground">
+                    AED
+                  </div>
+                  <Input
+                    id="acquisition_cost_aed"
+                    type="number"
+                    placeholder="e.g., 4000"
+                    className="rounded-l-none rounded-r-xl border-l-0"
+                    value={formData.acquisition_cost_aed}
+                    onChange={(e) => handleInputChange("acquisition_cost_aed", e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="depreciation_rate_percent">Depreciation Rate</Label>
+                <div className="flex">
+                  <Input
+                    id="depreciation_rate_percent"
+                    type="number"
+                    placeholder="e.g., 15.5"
+                    className="rounded-l-xl rounded-r-none"
+                    value={formData.depreciation_rate_percent}
+                    onChange={(e) => handleInputChange("depreciation_rate_percent", e.target.value)}
+                    step="0.01"
+                    min="0"
+                    max="100"
+                  />
+                  <div className="flex items-center justify-center px-3 bg-muted border border-l-0 border-input rounded-r-xl text-sm text-muted-foreground">
+                    %
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="refurb_estimate_aed">Refurb Estimate</Label>
+                <div className="flex">
+                  <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground">
+                    AED
+                  </div>
+                  <Input
+                    id="refurb_estimate_aed"
+                    type="number"
+                    placeholder="e.g., 500"
+                    className="rounded-l-none rounded-r-xl border-l-0"
+                    value={formData.refurb_estimate_aed}
+                    onChange={(e) => handleInputChange("refurb_estimate_aed", e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Accessories */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Accessories (Optional)</h4>
+              <div className="flex gap-2">
+                <Select
+                  value={newAccessory.name}
+                  onValueChange={(value) => setNewAccessory({ ...newAccessory, name: value })}
+                >
+                  <SelectTrigger className="rounded-xl flex-1">
+                    <SelectValue placeholder="Select accessory type" />
+                  </SelectTrigger>
+                  <SelectContent className="rounded-xl">
+                    <SelectItem value="Charger">Charger</SelectItem>
+                    <SelectItem value="Cable">Cable</SelectItem>
+                    <SelectItem value="Case">Case</SelectItem>
+                    <SelectItem value="Earphones">Earphones</SelectItem>
+                    <SelectItem value="Screen Protector">Screen Protector</SelectItem>
+                    <SelectItem value="Other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="flex items-center gap-0 flex-1">
+                  <div className="flex items-center justify-center px-3 bg-muted border border-r-0 border-input rounded-l-xl text-sm text-muted-foreground h-10">
+                    AED
+                  </div>
+                  <Input
+                    type="number"
+                    placeholder="Cost"
+                    className="rounded-l-none rounded-r-none border-l-0 border-r-0 h-10"
+                    value={newAccessory.cost}
+                    onChange={(e) => setNewAccessory({ ...newAccessory, cost: e.target.value })}
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-xl bg-transparent"
+                  onClick={() => {
+                    if (newAccessory.name && newAccessory.cost) {
+                      setFormData({
+                        ...formData,
+                        accessories: [
+                          ...formData.accessories,
+                          { name: newAccessory.name, cost: Number.parseFloat(newAccessory.cost) },
+                        ],
+                      })
+                      setNewAccessory({ name: "", cost: "" })
+                    }
+                  }}
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+              {formData.accessories.length > 0 && (
+                <div className="space-y-2">
+                  {formData.accessories.map((acc, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-2 bg-muted rounded-lg">
+                      <span className="text-sm">
+                        {acc.name}: AED {acc.cost}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => {
+                          setFormData({
+                            ...formData,
+                            accessories: formData.accessories.filter((_, i) => i !== idx),
+                          })
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Invoice Upload */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Invoice *</h4>
+              <div
+                className={cn(
+                  "border-2 border-dashed rounded-xl p-6 transition-colors duration-200",
+                  isDraggingInvoice ? "border-primary bg-primary/5" : "border-border",
+                )}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  setIsDraggingInvoice(true)
+                }}
+                onDragLeave={() => setIsDraggingInvoice(false)}
+                onDrop={handleInvoiceDrop}
+              >
+                {invoiceFile ? (
+                  <div className="space-y-3">
+                    {invoicePreview && (
+                      <div className="relative w-full h-48 rounded-lg overflow-hidden bg-muted">
+                        <img
+                          src={invoicePreview || "/placeholder.svg"}
+                          alt="Invoice preview"
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FileText className="h-5 w-5 text-primary" />
+                        <span className="text-sm font-medium">{invoiceFile.name}</span>
+                      </div>
+                      <Button variant="ghost" size="icon" onClick={removeInvoice} className="h-8 w-8">
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <label className="cursor-pointer block">
+                    <input
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={handleInvoiceSelect}
+                      className="hidden"
+                    />
+                    <div className="text-center">
+                      <FileText className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
+                      <p className="text-sm font-medium">Drop invoice here or click to upload</p>
+                      <p className="text-xs text-muted-foreground mt-1">Supports images and PDF files</p>
+                    </div>
+                  </label>
+                )}
+              </div>
+            </div>
+
+            {/* Notes */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium text-muted-foreground">Additional Notes</h4>
+              <Textarea
+                placeholder="Any additional information about this device..."
+                className="rounded-xl min-h-[100px]"
+                value={formData.notes}
+                onChange={(e) => handleInputChange("notes", e.target.value)}
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsDialogOpen(false)
+                setFormData({
+                  name: "",
+                  sku: "",
+                  serial_number: "",
+                  model_id: "",
+                  storage: "",
+                  color: "",
+                  brand: "",
+                  category: "",
+                  condition: "",
+                  status: "",
+                  acquisition_cost_aed: "",
+                  depreciation_rate_percent: "",
+                  refurb_estimate_aed: "",
+                  notes: "",
+                  accessories: [],
+                })
+                setInvoiceFile(null)
+                setInvoicePreview(null)
+                setSelectedModelForAdd("")
+              }}
+              className="rounded-xl"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={isSubmitting || !formData.model_id || !formData.condition || !invoiceFile}
+              className="rounded-xl"
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Adding...
+                </>
+              ) : (
+                "Save Device"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
