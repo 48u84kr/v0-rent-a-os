@@ -58,7 +58,7 @@ import {
 import { createClient } from "@/lib/supabase/client"
 import { ds, cn } from "@/lib/design-system"
 import { useToast } from "@/components/ui/use-toast"
-import { PricingCalculator } from "@/components/pricing-calculator"
+import { PricingCalculator } from "@/features/pricing"
 
 interface DeviceModel {
   id: string
