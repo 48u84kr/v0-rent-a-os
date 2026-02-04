@@ -61,7 +61,6 @@ import { createClient, createBrowserClient } from "@/lib/supabase/client"
 import { ds, cn } from "@/lib/design-system"
 import { useToast } from "@/components/ui/use-toast"
 import { PricingCalculator } from "@/components/pricing-calculator"
-import { calculateRentalPricing, fetchBusinessSettings as fetchPricingSettings } from "@/lib/pricing-engine"
 
 interface DeviceModel {
   id: string
@@ -485,54 +484,7 @@ export function InventoryManagement() {
 
       const invoiceUrl = urlData.publicUrl
 
-      // Calculate pricing if acquisition cost and depreciation rate are provided
-      let pricingData: {
-        rrp: number | null
-        price_3mo: number | null
-        price_6mo: number | null
-        price_12mo: number | null
-        price_24mo: number | null
-      } = {
-        rrp: null,
-        price_3mo: null,
-        price_6mo: null,
-        price_12mo: null,
-        price_24mo: null,
-      }
-
-      const acquisitionCost = formData.acquisition_cost_aed ? Number.parseFloat(formData.acquisition_cost_aed) : null
-      const depreciationRate = formData.depreciation_rate_percent
-        ? Number.parseFloat(formData.depreciation_rate_percent)
-        : null
-
-      if (acquisitionCost && depreciationRate) {
-        try {
-          // Fetch business settings for pricing calculation
-          const settings = await fetchPricingSettings()
-
-          // Calculate pricing using the pricing engine
-          // RRP is typically the acquisition cost for rental pricing calculations
-          const pricing = calculateRentalPricing(acquisitionCost, depreciationRate, settings)
-
-          pricingData = {
-            rrp: acquisitionCost,
-            price_3mo: pricing.price3Month,
-            price_6mo: pricing.price6Month,
-            price_12mo: pricing.price12Month,
-            price_24mo: pricing.price24Month,
-          }
-        } catch (pricingError) {
-          console.error("Error calculating pricing:", pricingError)
-          // Continue without pricing - device will still be added
-          toast({
-            title: "Pricing Calculation Warning",
-            description: "Device will be added but pricing could not be calculated. You can update pricing later.",
-            variant: "default",
-          })
-        }
-      }
-
-      // Insert device with invoice URL and calculated pricing
+      // Insert device with invoice URL
       const { error } = await supabase.from("devices").insert({
         name: formData.name || null,
         sku: formData.sku || null,
@@ -544,19 +496,15 @@ export function InventoryManagement() {
         category: formData.category || null,
         condition: formData.condition || null,
         storage: formData.storage || null,
-        acquisition_cost_aed: acquisitionCost,
+        acquisition_cost_aed: formData.acquisition_cost_aed ? Number.parseFloat(formData.acquisition_cost_aed) : null,
         // Added depreciation_rate_percent and refurb_estimate_aed to insert
-        depreciation_rate_percent: depreciationRate,
+        depreciation_rate_percent: formData.depreciation_rate_percent
+          ? Number.parseFloat(formData.depreciation_rate_percent)
+          : null,
         refurb_estimate_aed: formData.refurb_estimate_aed ? Number.parseFloat(formData.refurb_estimate_aed) : null,
         notes: formData.notes || null,
         invoice_url: invoiceUrl,
         accessories: formData.accessories.length > 0 ? formData.accessories : null,
-        // Include calculated pricing
-        rrp: pricingData.rrp,
-        price_3mo: pricingData.price_3mo,
-        price_6mo: pricingData.price_6mo,
-        price_12mo: pricingData.price_12mo,
-        price_24mo: pricingData.price_24mo,
       })
 
       if (error) {
@@ -577,14 +525,9 @@ export function InventoryManagement() {
           variant: "destructive",
         })
       } else {
-        const pricingMessage =
-          pricingData.price_3mo !== null
-            ? " Rental pricing has been automatically calculated."
-            : " Note: Pricing was not calculated (requires both cost and depreciation rate)."
-
         toast({
           title: "Device Added",
-          description: `The device has been successfully added to inventory.${pricingMessage}`,
+          description: "The device has been successfully added to inventory.",
         })
 
         setFormData({

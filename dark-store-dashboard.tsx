@@ -13,6 +13,7 @@ import {
   Download,
   Bell,
   Lock,
+  Briefcase,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -40,6 +41,7 @@ import { InventoryManagement } from "./components/inventory-management"
 import { OrdersManagement } from "./components/orders-management"
 import { CustomerManagement } from "./components/customer-management"
 import { SubscriptionManagement } from "./components/subscription-management"
+import { InvestorPortal } from "./components/investor-portal"
 
 const menuItems = [
   { title: "Overview", icon: BarChart3, id: "overview" },
@@ -48,6 +50,7 @@ const menuItems = [
   { title: "Orders", icon: ShoppingCart, id: "orders" },
   { title: "Subscriptions", icon: TrendingUp, id: "subscriptions" },
   { title: "Customers", icon: Users, id: "customers" },
+  { title: "Investor Portal", icon: Briefcase, id: "investor" },
 ]
 
 export default function DarkStoreDashboard() {
@@ -64,6 +67,8 @@ export default function DarkStoreDashboard() {
         return { title: "Customer Management", description: "Manage your customer database and relationships" }
       case "subscriptions":
         return { title: "Subscription Management", description: "Manage device rental subscriptions and renewals" }
+      case "investor":
+        return { title: "Investor Portal", description: "View investment portfolio and expected returns" }
       default:
         return { title: "Store Manager Dashboard", description: "Monitor performance and analytics" }
     }
@@ -160,6 +165,8 @@ export default function DarkStoreDashboard() {
               <CustomerManagement />
             ) : activeSection === "subscriptions" ? (
               <SubscriptionManagement />
+            ) : activeSection === "investor" ? (
+              <InvestorPortal />
             ) : (
               <>
                 {/* KPI Cards */}
