@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import {
   TrendingUp,
   DollarSign,
@@ -13,6 +13,13 @@ import {
   Wallet,
   PiggyBank,
   Calculator,
+  CheckCircle2,
+  Circle,
+  CreditCard,
+  UserPlus,
+  X,
+  Check,
+  AlertTriangle,
 } from "lucide-react"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -34,8 +41,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Label } from "@/components/ui/label"
 import { createClient } from "@/lib/supabase/client"
+import { useToast } from "@/components/ui/use-toast"
 import { cn } from "@/lib/utils"
 
 interface Device {
@@ -48,6 +65,9 @@ interface Device {
   color: string | null
   condition: string | null
   acquisition_cost_aed: number | null
+  investor_id: string | null
+  investor_paid_status: string | null
+  investor_assigned_at: string | null
   created_at: string
 }
 
@@ -57,16 +77,44 @@ interface DeviceWithInvestorData extends Device {
   totalProfit: number
 }
 
-const INVESTOR_PROFIT_RATE = 0.15 // 15%
+interface InvestorUser {
+  id: string
+  first_name: string | null
+  last_name: string | null
+  role: string
+}
+
+const INVESTOR_PROFIT_RATE = 0.15
 const PAYMENT_MONTHS = 24
 
-export function InvestorPortal() {
+interface InvestorPortalProps {
+  userRole?: string
+}
+
+export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
   const [devices, setDevices] = useState<DeviceWithInvestorData[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState("")
   const [sortField, setSortField] = useState<string>("created_at")
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc")
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
+  const [statusFilter, setStatusFilter] = useState<string>("all")
+  const { toast } = useToast()
+
+  // Admin: Set Paid Devices dialog
+  const [isPaidDialogOpen, setIsPaidDialogOpen] = useState(false)
+  const [selectedPaidDeviceIds, setSelectedPaidDeviceIds] = useState<Set<number>>(new Set())
+  const [isUpdatingPaid, setIsUpdatingPaid] = useState(false)
+  const [paidDialogSearch, setPaidDialogSearch] = useState("")
+
+  // Admin: Assign Devices to Investor dialog
+  const [isAssignDialogOpen, setIsAssignDialogOpen] = useState(false)
+  const [investors, setInvestors] = useState<InvestorUser[]>([])
+  const [selectedInvestorId, setSelectedInvestorId] = useState<string>("")
+  const [unassignedDevices, setUnassignedDevices] = useState<Device[]>([])
+  const [selectedAssignDeviceIds, setSelectedAssignDeviceIds] = useState<Set<number>>(new Set())
+  const [isAssigning, setIsAssigning] = useState(false)
+  const [assignDialogSearch, setAssignDialogSearch] = useState("")
 
   // Summary stats
   const [totalInvested, setTotalInvested] = useState(0)
@@ -74,39 +122,46 @@ export function InvestorPortal() {
   const [totalProfit, setTotalProfit] = useState(0)
   const [deviceCount, setDeviceCount] = useState(0)
 
-  const fetchDevices = async () => {
+  const isAdmin = userRole === "admin"
+
+  const fetchDevices = useCallback(async () => {
     setIsLoading(true)
     try {
       const supabase = createClient()
-      const { data, error } = await supabase
+
+      let query = supabase
         .from("devices")
-        .select("id, name, brand, category, serial_number, storage, color, condition, acquisition_cost_aed, created_at")
+        .select("id, name, brand, category, serial_number, storage, color, condition, acquisition_cost_aed, investor_id, investor_paid_status, investor_assigned_at, created_at")
         .not("acquisition_cost_aed", "is", null)
-        .order(sortField, { ascending: sortDirection === "asc" })
+
+      // Investors only see devices assigned to them
+      if (!isAdmin) {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          query = query.eq("investor_id", user.id)
+        }
+      } else {
+        // Admins see devices assigned to any investor
+        query = query.not("investor_id", "is", null)
+      }
+
+      const { data, error } = await query.order(sortField, { ascending: sortDirection === "asc" })
 
       if (error) {
         console.error("Error fetching devices:", error)
         return
       }
 
-      // Calculate investor data for each device
       const devicesWithInvestorData: DeviceWithInvestorData[] = (data || []).map((device) => {
         const cost = device.acquisition_cost_aed || 0
         const investorReturn = cost * (1 + INVESTOR_PROFIT_RATE)
         const monthlyPayment = investorReturn / PAYMENT_MONTHS
         const profit = cost * INVESTOR_PROFIT_RATE
-
-        return {
-          ...device,
-          investorReturn,
-          monthlyPayment,
-          totalProfit: profit,
-        }
+        return { ...device, investorReturn, monthlyPayment, totalProfit: profit }
       })
 
       setDevices(devicesWithInvestorData)
 
-      // Calculate summary stats
       const totals = devicesWithInvestorData.reduce(
         (acc, device) => {
           acc.invested += device.acquisition_cost_aed || 0
@@ -126,13 +181,161 @@ export function InvestorPortal() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [sortField, sortDirection, isAdmin])
 
   useEffect(() => {
     fetchDevices()
-  }, [sortField, sortDirection])
+  }, [fetchDevices])
 
-  // Filter devices based on search and category
+  // Admin: fetch investors for assign dialog
+  const fetchInvestors = async () => {
+    const supabase = createClient()
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, first_name, last_name, role")
+      .eq("role", "investor")
+
+    if (!error && data) {
+      setInvestors(data)
+    }
+  }
+
+  // Admin: fetch unassigned devices for assign dialog
+  const fetchUnassignedDevices = async () => {
+    const supabase = createClient()
+    const { data, error } = await supabase
+      .from("devices")
+      .select("id, name, brand, category, serial_number, storage, color, condition, acquisition_cost_aed, investor_id, investor_paid_status, investor_assigned_at, created_at")
+      .is("investor_id", null)
+      .not("acquisition_cost_aed", "is", null)
+      .order("name")
+
+    if (!error && data) {
+      setUnassignedDevices(data)
+    }
+  }
+
+  // Open Set Paid dialog
+  const openPaidDialog = () => {
+    // Pre-select devices that are already marked as paid
+    const paidIds = new Set(
+      devices.filter((d) => d.investor_paid_status === "paid").map((d) => d.id)
+    )
+    setSelectedPaidDeviceIds(paidIds)
+    setPaidDialogSearch("")
+    setIsPaidDialogOpen(true)
+  }
+
+  // Toggle paid selection for a device
+  const togglePaidDevice = (deviceId: number) => {
+    setSelectedPaidDeviceIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(deviceId)) {
+        next.delete(deviceId)
+      } else {
+        next.add(deviceId)
+      }
+      return next
+    })
+  }
+
+  // Confirm paid status changes
+  const handleConfirmPaid = async () => {
+    setIsUpdatingPaid(true)
+    try {
+      const supabase = createClient()
+
+      // Update all investor-assigned devices: set paid or unpaid
+      const updates = devices.map((device) => {
+        const shouldBePaid = selectedPaidDeviceIds.has(device.id)
+        return supabase
+          .from("devices")
+          .update({ investor_paid_status: shouldBePaid ? "paid" : "unpaid" })
+          .eq("id", device.id)
+      })
+
+      await Promise.all(updates)
+
+      toast({
+        title: "Payment Status Updated",
+        description: `${selectedPaidDeviceIds.size} device(s) marked as paid.`,
+      })
+
+      setIsPaidDialogOpen(false)
+      fetchDevices()
+    } catch (err) {
+      console.error("Error updating paid status:", err)
+      toast({
+        title: "Error",
+        description: "Failed to update payment status. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsUpdatingPaid(false)
+    }
+  }
+
+  // Open assign dialog
+  const openAssignDialog = async () => {
+    setSelectedInvestorId("")
+    setSelectedAssignDeviceIds(new Set())
+    setAssignDialogSearch("")
+    setIsAssignDialogOpen(true)
+    await Promise.all([fetchInvestors(), fetchUnassignedDevices()])
+  }
+
+  // Toggle assign device selection
+  const toggleAssignDevice = (deviceId: number) => {
+    setSelectedAssignDeviceIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(deviceId)) {
+        next.delete(deviceId)
+      } else {
+        next.add(deviceId)
+      }
+      return next
+    })
+  }
+
+  // Confirm assign devices to investor
+  const handleConfirmAssign = async () => {
+    if (!selectedInvestorId || selectedAssignDeviceIds.size === 0) return
+    setIsAssigning(true)
+    try {
+      const supabase = createClient()
+      const deviceIds = Array.from(selectedAssignDeviceIds)
+
+      const { error } = await supabase
+        .from("devices")
+        .update({
+          investor_id: selectedInvestorId,
+          investor_paid_status: "unpaid",
+          investor_assigned_at: new Date().toISOString(),
+        })
+        .in("id", deviceIds)
+
+      if (error) throw error
+
+      toast({
+        title: "Devices Assigned",
+        description: `${deviceIds.length} device(s) assigned to investor.`,
+      })
+
+      setIsAssignDialogOpen(false)
+      fetchDevices()
+    } catch (err) {
+      console.error("Error assigning devices:", err)
+      toast({
+        title: "Error",
+        description: "Failed to assign devices. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsAssigning(false)
+    }
+  }
+
+  // Filter devices
   const filteredDevices = devices.filter((device) => {
     const matchesSearch =
       searchTerm === "" ||
@@ -141,11 +344,11 @@ export function InvestorPortal() {
       device.serial_number?.toLowerCase().includes(searchTerm.toLowerCase())
 
     const matchesCategory = categoryFilter === "all" || device.category === categoryFilter
+    const matchesStatus = statusFilter === "all" || device.investor_paid_status === statusFilter
 
-    return matchesSearch && matchesCategory
+    return matchesSearch && matchesCategory && matchesStatus
   })
 
-  // Get unique categories for filter
   const categories = [...new Set(devices.map((d) => d.category).filter(Boolean))]
 
   const handleSort = (field: string) => {
@@ -174,6 +377,53 @@ export function InvestorPortal() {
     }).format(amount)
   }
 
+  const getPaidBadge = (status: string | null) => {
+    switch (status) {
+      case "paid":
+        return (
+          <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 gap-1">
+            <CheckCircle2 className="h-3 w-3" />
+            Paid
+          </Badge>
+        )
+      case "in_progress":
+        return (
+          <Badge className="bg-amber-100 text-amber-700 border-amber-200 gap-1">
+            <Circle className="h-3 w-3" />
+            In Progress
+          </Badge>
+        )
+      default:
+        return (
+          <Badge variant="outline" className="gap-1 text-muted-foreground">
+            <Circle className="h-3 w-3" />
+            Unpaid
+          </Badge>
+        )
+    }
+  }
+
+  // Filtered devices for the paid dialog
+  const filteredPaidDialogDevices = devices.filter(
+    (d) =>
+      paidDialogSearch === "" ||
+      d.name?.toLowerCase().includes(paidDialogSearch.toLowerCase()) ||
+      d.brand?.toLowerCase().includes(paidDialogSearch.toLowerCase()) ||
+      d.serial_number?.toLowerCase().includes(paidDialogSearch.toLowerCase())
+  )
+
+  // Filtered devices for the assign dialog
+  const filteredAssignDialogDevices = unassignedDevices.filter(
+    (d) =>
+      assignDialogSearch === "" ||
+      d.name?.toLowerCase().includes(assignDialogSearch.toLowerCase()) ||
+      d.brand?.toLowerCase().includes(assignDialogSearch.toLowerCase()) ||
+      d.serial_number?.toLowerCase().includes(assignDialogSearch.toLowerCase())
+  )
+
+  const paidCount = devices.filter((d) => d.investor_paid_status === "paid").length
+  const unpaidCount = devices.filter((d) => d.investor_paid_status !== "paid").length
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -181,13 +431,34 @@ export function InvestorPortal() {
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Investor Portal</h2>
           <p className="text-muted-foreground">
-            View your investment portfolio and expected returns
+            {isAdmin
+              ? "Manage investor device assignments and payment statuses"
+              : "View your investment portfolio and expected returns"}
           </p>
         </div>
-        <Button onClick={fetchDevices} variant="outline" className="gap-2 bg-transparent">
-          <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {isAdmin && (
+            <>
+              <Button onClick={openAssignDialog} className="gap-2">
+                <UserPlus className="h-4 w-4" />
+                Assign Devices
+              </Button>
+              <Button
+                onClick={openPaidDialog}
+                variant="outline"
+                className="gap-2 bg-transparent"
+                disabled={devices.length === 0}
+              >
+                <CreditCard className="h-4 w-4" />
+                Set Paid Devices
+              </Button>
+            </>
+          )}
+          <Button onClick={fetchDevices} variant="outline" className="gap-2 bg-transparent">
+            <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -221,10 +492,10 @@ export function InvestorPortal() {
               <Skeleton className="h-8 w-32" />
             ) : (
               <>
-                <div className="text-2xl font-bold text-emerald-600">{formatCurrency(totalReturn)}</div>
-                <p className="text-xs text-muted-foreground">
-                  Expected total payout
-                </p>
+                <div className="text-2xl font-bold text-emerald-600">
+                  {formatCurrency(totalReturn)}
+                </div>
+                <p className="text-xs text-muted-foreground">Expected total payout</p>
               </>
             )}
           </CardContent>
@@ -240,10 +511,10 @@ export function InvestorPortal() {
               <Skeleton className="h-8 w-32" />
             ) : (
               <>
-                <div className="text-2xl font-bold text-emerald-600">{formatCurrency(totalProfit)}</div>
-                <p className="text-xs text-muted-foreground">
-                  15% return on investment
-                </p>
+                <div className="text-2xl font-bold text-emerald-600">
+                  {formatCurrency(totalProfit)}
+                </div>
+                <p className="text-xs text-muted-foreground">15% return on investment</p>
               </>
             )}
           </CardContent>
@@ -251,8 +522,8 @@ export function InvestorPortal() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Monthly Payment (Avg)</CardTitle>
-            <Calculator className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Payment Status</CardTitle>
+            <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             {isLoading ? (
@@ -260,10 +531,10 @@ export function InvestorPortal() {
             ) : (
               <>
                 <div className="text-2xl font-bold">
-                  {formatCurrency(totalReturn / PAYMENT_MONTHS)}
+                  {paidCount}/{deviceCount}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Over {PAYMENT_MONTHS} months
+                  {paidCount} paid, {unpaidCount} remaining
                 </p>
               </>
             )}
@@ -271,7 +542,7 @@ export function InvestorPortal() {
         </Card>
       </div>
 
-      {/* Filters */}
+      {/* Portfolio Table */}
       <Card>
         <CardHeader>
           <CardTitle>Investment Portfolio</CardTitle>
@@ -292,7 +563,7 @@ export function InvestorPortal() {
             </div>
             <Select value={categoryFilter} onValueChange={setCategoryFilter}>
               <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder="Filter by category" />
+                <SelectValue placeholder="Category" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
@@ -303,9 +574,19 @@ export function InvestorPortal() {
                 ))}
               </SelectContent>
             </Select>
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="w-[160px]">
+                <SelectValue placeholder="Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Statuses</SelectItem>
+                <SelectItem value="paid">Paid</SelectItem>
+                <SelectItem value="unpaid">Unpaid</SelectItem>
+                <SelectItem value="in_progress">In Progress</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
-          {/* Table */}
           <div className="rounded-md border">
             <Table>
               <TableHeader>
@@ -335,27 +616,31 @@ export function InvestorPortal() {
                   >
                     Device Cost <SortIcon field="acquisition_cost_aed" />
                   </TableHead>
-                  <TableHead className="text-right">Total Return (Cost + 15%)</TableHead>
-                  <TableHead className="text-right">Monthly Payment (24mo)</TableHead>
+                  <TableHead className="text-right">Total Return</TableHead>
+                  <TableHead className="text-right">Monthly (24mo)</TableHead>
+                  <TableHead className="text-center">Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {isLoading ? (
                   Array.from({ length: 5 }).map((_, i) => (
-                    <TableRow key={i}>
-                      <TableCell><Skeleton className="h-4 w-32" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-16" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                    <TableRow key={`skeleton-${i}`}>
+                      {Array.from({ length: 8 }).map((_, j) => (
+                        <TableCell key={`skeleton-${i}-${j}`}>
+                          <Skeleton className="h-4 w-20" />
+                        </TableCell>
+                      ))}
                     </TableRow>
                   ))
                 ) : filteredDevices.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                      No devices found matching your criteria
+                    <TableCell colSpan={8} className="text-center py-12 text-muted-foreground">
+                      <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      {devices.length === 0
+                        ? isAdmin
+                          ? "No devices assigned to investors yet. Use 'Assign Devices' to get started."
+                          : "No devices have been assigned to your portfolio yet."
+                        : "No devices found matching your criteria."}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -387,8 +672,13 @@ export function InvestorPortal() {
                         {formatCurrency(device.investorReturn)}
                       </TableCell>
                       <TableCell className="text-right">
-                        <div className="font-medium">{formatCurrency(device.monthlyPayment)}</div>
+                        <div className="font-medium">
+                          {formatCurrency(device.monthlyPayment)}
+                        </div>
                         <div className="text-xs text-muted-foreground">per month</div>
+                      </TableCell>
+                      <TableCell className="text-center">
+                        {getPaidBadge(device.investor_paid_status)}
                       </TableCell>
                     </TableRow>
                   ))
@@ -434,6 +724,317 @@ export function InvestorPortal() {
           )}
         </CardContent>
       </Card>
+
+      {/* ===== Set Paid Devices Dialog (Admin only) ===== */}
+      <Dialog open={isPaidDialogOpen} onOpenChange={setIsPaidDialogOpen}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CreditCard className="h-5 w-5" />
+              Set Paid Devices
+            </DialogTitle>
+            <DialogDescription>
+              Select the devices that have been paid off to the investor.
+              {selectedPaidDeviceIds.size > 0 && (
+                <span className="ml-1 font-medium text-foreground">
+                  {selectedPaidDeviceIds.size} selected
+                </span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 flex-1 overflow-hidden flex flex-col">
+            {/* Search */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search devices..."
+                value={paidDialogSearch}
+                onChange={(e) => setPaidDialogSearch(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+
+            {/* Quick actions */}
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-transparent"
+                onClick={() =>
+                  setSelectedPaidDeviceIds(new Set(filteredPaidDialogDevices.map((d) => d.id)))
+                }
+              >
+                Select All
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-transparent"
+                onClick={() => setSelectedPaidDeviceIds(new Set())}
+              >
+                Deselect All
+              </Button>
+            </div>
+
+            {/* Device list */}
+            <div className="flex-1 overflow-y-auto border rounded-lg divide-y min-h-0">
+              {filteredPaidDialogDevices.length === 0 ? (
+                <div className="p-8 text-center text-muted-foreground">
+                  No devices found
+                </div>
+              ) : (
+                filteredPaidDialogDevices.map((device) => {
+                  const isSelected = selectedPaidDeviceIds.has(device.id)
+                  return (
+                    <button
+                      type="button"
+                      key={device.id}
+                      className={cn(
+                        "w-full flex items-center gap-4 p-4 text-left transition-colors hover:bg-muted/50",
+                        isSelected && "bg-emerald-50 dark:bg-emerald-950/20"
+                      )}
+                      onClick={() => togglePaidDevice(device.id)}
+                    >
+                      <div
+                        className={cn(
+                          "w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors",
+                          isSelected
+                            ? "bg-emerald-600 border-emerald-600"
+                            : "border-muted-foreground/30"
+                        )}
+                      >
+                        {isSelected && <Check className="h-4 w-4 text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">
+                          {device.name || "Unnamed Device"}
+                        </div>
+                        <div className="text-xs text-muted-foreground flex items-center gap-2">
+                          {device.brand && <span>{device.brand}</span>}
+                          {device.serial_number && <span>SN: {device.serial_number}</span>}
+                          {device.storage && <span>{device.storage}</span>}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-medium text-sm">
+                          {formatCurrency(device.acquisition_cost_aed || 0)}
+                        </div>
+                        <div className="text-xs text-emerald-600">
+                          Return: {formatCurrency(device.investorReturn)}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        {device.investor_paid_status === "paid" && !isSelected ? (
+                          <Badge variant="outline" className="text-xs">Was Paid</Badge>
+                        ) : isSelected ? (
+                          <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 text-xs">
+                            Paid
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="flex-col sm:flex-row gap-2 pt-4 border-t">
+            <div className="flex-1 text-sm text-muted-foreground">
+              {selectedPaidDeviceIds.size} of {devices.length} devices will be marked as paid
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setIsPaidDialogOpen(false)}
+              className="bg-transparent"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirmPaid}
+              disabled={isUpdatingPaid}
+              className="gap-2"
+            >
+              {isUpdatingPaid ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+              Confirm Payment Status
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ===== Assign Devices to Investor Dialog (Admin only) ===== */}
+      <Dialog open={isAssignDialogOpen} onOpenChange={setIsAssignDialogOpen}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <UserPlus className="h-5 w-5" />
+              Assign Devices to Investor
+            </DialogTitle>
+            <DialogDescription>
+              Select an investor and choose devices to assign to their portfolio.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 flex-1 overflow-hidden flex flex-col">
+            {/* Investor Selection */}
+            <div className="space-y-2">
+              <Label>Select Investor</Label>
+              <Select value={selectedInvestorId} onValueChange={setSelectedInvestorId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose an investor..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {investors.length === 0 ? (
+                    <SelectItem value="_none" disabled>
+                      No investors found
+                    </SelectItem>
+                  ) : (
+                    investors.map((inv) => (
+                      <SelectItem key={inv.id} value={inv.id}>
+                        {inv.first_name && inv.last_name
+                          ? `${inv.first_name} ${inv.last_name}`
+                          : `Investor (${inv.id.slice(0, 8)}...)`}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+              {investors.length === 0 && (
+                <p className="text-xs text-amber-600 flex items-center gap-1">
+                  <AlertTriangle className="h-3 w-3" />
+                  No users with the investor role found. Assign the investor role first in User Management.
+                </p>
+              )}
+            </div>
+
+            {/* Device search */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search unassigned devices..."
+                value={assignDialogSearch}
+                onChange={(e) => setAssignDialogSearch(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+
+            {/* Quick actions */}
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-transparent"
+                onClick={() =>
+                  setSelectedAssignDeviceIds(
+                    new Set(filteredAssignDialogDevices.map((d) => d.id))
+                  )
+                }
+              >
+                Select All
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-transparent"
+                onClick={() => setSelectedAssignDeviceIds(new Set())}
+              >
+                Deselect All
+              </Button>
+              <span className="text-sm text-muted-foreground ml-auto">
+                {selectedAssignDeviceIds.size} selected
+              </span>
+            </div>
+
+            {/* Device list */}
+            <div className="flex-1 overflow-y-auto border rounded-lg divide-y min-h-0">
+              {filteredAssignDialogDevices.length === 0 ? (
+                <div className="p-8 text-center text-muted-foreground">
+                  <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  No unassigned devices available
+                </div>
+              ) : (
+                filteredAssignDialogDevices.map((device) => {
+                  const isSelected = selectedAssignDeviceIds.has(device.id)
+                  return (
+                    <button
+                      type="button"
+                      key={device.id}
+                      className={cn(
+                        "w-full flex items-center gap-4 p-4 text-left transition-colors hover:bg-muted/50",
+                        isSelected && "bg-blue-50 dark:bg-blue-950/20"
+                      )}
+                      onClick={() => toggleAssignDevice(device.id)}
+                    >
+                      <div
+                        className={cn(
+                          "w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors",
+                          isSelected
+                            ? "bg-blue-600 border-blue-600"
+                            : "border-muted-foreground/30"
+                        )}
+                      >
+                        {isSelected && <Check className="h-4 w-4 text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">
+                          {device.name || "Unnamed Device"}
+                        </div>
+                        <div className="text-xs text-muted-foreground flex items-center gap-2">
+                          {device.brand && <span>{device.brand}</span>}
+                          {device.serial_number && <span>SN: {device.serial_number}</span>}
+                          {device.storage && <span>{device.storage}</span>}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-medium text-sm">
+                          {formatCurrency(device.acquisition_cost_aed || 0)}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {device.category || "Uncategorized"}
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="flex-col sm:flex-row gap-2 pt-4 border-t">
+            <div className="flex-1 text-sm text-muted-foreground">
+              {selectedAssignDeviceIds.size} device(s) will be assigned
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setIsAssignDialogOpen(false)}
+              className="bg-transparent"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirmAssign}
+              disabled={
+                isAssigning ||
+                !selectedInvestorId ||
+                selectedAssignDeviceIds.size === 0
+              }
+              className="gap-2"
+            >
+              {isAssigning ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <UserPlus className="h-4 w-4" />
+              )}
+              Assign to Investor
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

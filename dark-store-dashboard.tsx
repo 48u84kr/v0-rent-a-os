@@ -248,7 +248,7 @@ export default function DarkStoreDashboard() {
             ) : activeSection === "subscriptions" ? (
               <SubscriptionManagement />
             ) : activeSection === "investor" ? (
-              <InvestorPortal />
+              <InvestorPortal userRole={user?.role} />
             ) : activeSection === "users" && user?.role === "admin" ? (
               <UserManagement />
             ) : (
