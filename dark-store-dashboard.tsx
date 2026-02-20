@@ -18,6 +18,7 @@ import {
   Briefcase,
   LogOut,
   User,
+  Shield,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -47,14 +48,20 @@ import { OrdersManagement } from "./components/orders-management"
 import { CustomerManagement } from "./components/customer-management"
 import { SubscriptionManagement } from "./components/subscription-management"
 import { InvestorPortal } from "./components/investor-portal"
+import { UserManagement } from "./components/user-management"
 
-const menuItems = [
+const adminMenuItems = [
   { title: "Overview", icon: BarChart3, id: "overview" },
   { title: "Financial", icon: DollarSign, id: "financial" },
   { title: "Inventory", icon: Package, id: "inventory" },
   { title: "Orders", icon: ShoppingCart, id: "orders" },
   { title: "Subscriptions", icon: TrendingUp, id: "subscriptions" },
   { title: "Customers", icon: Users, id: "customers" },
+  { title: "Investor Portal", icon: Briefcase, id: "investor" },
+  { title: "User Management", icon: Shield, id: "users" },
+]
+
+const investorMenuItems = [
   { title: "Investor Portal", icon: Briefcase, id: "investor" },
 ]
 
@@ -70,12 +77,26 @@ export default function DarkStoreDashboard() {
       const supabase = createClient()
       const { data: { user: authUser } } = await supabase.auth.getUser()
       if (authUser) {
+        // Fetch role from profiles table (source of truth)
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("role, first_name, last_name")
+          .eq("id", authUser.id)
+          .single()
+
+        const userRole = profile?.role || authUser.user_metadata?.role || "admin"
+
         setUser({
           email: authUser.email,
-          first_name: authUser.user_metadata?.first_name,
-          last_name: authUser.user_metadata?.last_name,
-          role: authUser.user_metadata?.role || "admin",
+          first_name: profile?.first_name || authUser.user_metadata?.first_name,
+          last_name: profile?.last_name || authUser.user_metadata?.last_name,
+          role: userRole,
         })
+
+        // Set default section based on role
+        if (userRole === "investor") {
+          setActiveSection("investor")
+        }
       }
     }
     fetchUser()
@@ -101,6 +122,8 @@ export default function DarkStoreDashboard() {
         return { title: "Subscription Management", description: "Manage device rental subscriptions and renewals" }
       case "investor":
         return { title: "Investor Portal", description: "View investment portfolio and expected returns" }
+      case "users":
+        return { title: "User Management", description: "Manage user roles and access permissions" }
       default:
         return { title: "Store Manager Dashboard", description: "Monitor performance and analytics" }
     }
@@ -128,7 +151,7 @@ export default function DarkStoreDashboard() {
               <SidebarGroupLabel>Dashboard</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {menuItems.map((item) => (
+                  {(user?.role === "investor" ? investorMenuItems : adminMenuItems).map((item) => (
                     <SidebarMenuItem key={item.title}>
                       <SidebarMenuButton asChild isActive={activeSection === item.id}>
                         <a
@@ -226,6 +249,8 @@ export default function DarkStoreDashboard() {
               <SubscriptionManagement />
             ) : activeSection === "investor" ? (
               <InvestorPortal />
+            ) : activeSection === "users" && user?.role === "admin" ? (
+              <UserManagement />
             ) : (
               <>
                 {/* KPI Cards */}
