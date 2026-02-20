@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Loader2, Eye, EyeOff, Mail, Lock, User, ArrowRight, Check, X } from "lucide-react"
 import Link from "next/link"
@@ -44,7 +44,7 @@ export default function SignUpPage() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
-  const [role, setRole] = useState("admin")
+
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -87,7 +87,6 @@ export default function SignUpPage() {
         data: {
           first_name: firstName.trim(),
           last_name: lastName.trim(),
-          role,
         },
       },
     })
@@ -179,18 +178,6 @@ export default function SignUpPage() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="signup-role">Role</Label>
-                <Select value={role} onValueChange={setRole}>
-                  <SelectTrigger className="rounded-xl h-11">
-                    <SelectValue placeholder="Select a role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="admin">Admin</SelectItem>
-                    <SelectItem value="investor">Investor</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
 
               <div className="space-y-2">
                 <Label htmlFor="signup-password">Password</Label>
