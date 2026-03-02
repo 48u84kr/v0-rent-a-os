@@ -28,6 +28,8 @@ import {
   ChevronRight,
   Settings,
   Calculator,
+  Upload,
+  Download,
 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -55,7 +57,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { createClient } from "@/lib/supabase/client"
+import { createClient, createBrowserClient } from "@/lib/supabase/client"
 import { ds, cn } from "@/lib/design-system"
 import { useToast } from "@/components/ui/use-toast"
 import { PricingCalculator } from "@/components/pricing-calculator"
@@ -98,6 +100,20 @@ interface Device {
   invoice_url: string | null
   accessories: { name: string; cost: number }[] | null
   created_at: string
+  // Added fields for CSV export
+  rrp: number | null
+  price_3mo: number | null
+  price_6mo: number | null
+  price_12mo: number | null
+  price_24mo: number | null
+  price_tbyb: number | null
+  Residual_Value_Percent: number | null
+  device_models?: {
+    // For relation data in export
+    name: string
+    brand: string
+    category: string
+  }
 }
 
 export function InventoryManagement() {
@@ -220,28 +236,65 @@ export function InventoryManagement() {
   const [editModelNewStorage, setEditModelNewStorage] = useState("")
   const [editModelNewColor, setEditModelNewColor] = useState("")
 
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [isImporting, setIsImporting] = useState(false)
+
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false)
+  const [selectedExportColumns, setSelectedExportColumns] = useState<string[]>([
+    "id",
+    "sku",
+    "serial_number",
+    "name",
+    "brand",
+    "category",
+    "model_name",
+    "storage",
+    "color",
+    "condition",
+    "status",
+    "acquisition_cost_aed",
+    "rrp",
+    "depreciation_rate_percent",
+    "refurb_estimate_aed",
+    "price_3mo",
+    "price_6mo",
+    "price_12mo",
+    "price_24mo",
+    "created_at",
+  ])
+
+  // Available columns for export with labels
+  const exportColumns = [
+    { key: "id", label: "ID" },
+    { key: "sku", label: "SKU" },
+    { key: "serial_number", label: "Serial Number" },
+    { key: "name", label: "Name" },
+    { key: "brand", label: "Brand" },
+    { key: "category", label: "Category" },
+    { key: "model_id", label: "Model ID" },
+    { key: "model_name", label: "Model Name" },
+    { key: "storage", label: "Storage" },
+    { key: "color", label: "Color" },
+    { key: "condition", label: "Condition" },
+    { key: "status", label: "Status" },
+    { key: "acquisition_cost_aed", label: "Acquisition Cost (AED)" },
+    { key: "rrp", label: "RRP" },
+    { key: "depreciation_rate_percent", label: "Depreciation Rate (%)" },
+    { key: "refurb_estimate_aed", label: "Refurb Estimate (AED)" },
+    { key: "price_3mo", label: "Price 3mo" },
+    { key: "price_6mo", label: "Price 6mo" },
+    { key: "price_12mo", label: "Price 12mo" },
+    { key: "price_24mo", label: "Price 24mo" },
+    { key: "price_tbyb", label: "Price TBYB" },
+    { key: "Residual_Value_Percent", label: "Residual Value (%)" },
+    { key: "accessories", label: "Accessories" },
+    { key: "invoice_url", label: "Invoice URL" },
+    { key: "notes", label: "Notes" },
+    { key: "created_at", label: "Created At" },
+  ]
+
   const filteredDevices = devices
-    .filter((device) => {
-      const matchesSearch =
-        searchQuery === "" ||
-        device.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        device.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        device.serial_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        device.brand?.toLowerCase().includes(searchQuery.toLowerCase())
-
-      const matchesCategory =
-        categoryFilter === "all" || device.category?.toLowerCase() === categoryFilter.toLowerCase()
-
-      const matchesStatus = statusFilter === "all" || device.status?.toLowerCase() === statusFilter.toLowerCase()
-
-      return matchesSearch && matchesCategory && matchesStatus
-    })
-    .sort((a, b) => {
-      if (valueSortDirection === "none") return 0
-      const aValue = a.acquisition_cost_aed ?? 0
-      const bValue = b.acquisition_cost_aed ?? 0
-      return valueSortDirection === "asc" ? aValue - bValue : bValue - aValue
-    })
 
   const copyToClipboard = async (text: string, field: string) => {
     try {
@@ -318,20 +371,26 @@ export function InventoryManagement() {
   // Fetch BusinessSettings
   const fetchBusinessSettings = async () => {
     setIsLoadingSettings(true)
-    const supabase = createClient()
-    const { data, error } = await supabase.from("business_settings").select("*").order("id")
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.from("business_settings").select("*").order("id")
 
-    if (error) {
-      console.error("Error fetching business settings:", error)
-      toast({
-        title: "Error",
-        description: "Failed to load business settings.",
-        variant: "destructive",
-      })
-    } else {
-      setBusinessSettings(data || [])
+      if (error) {
+        console.error("Error fetching business settings:", error)
+        toast({
+          title: "Error",
+          description: "Failed to load business settings.",
+          variant: "destructive",
+        })
+      } else {
+        setBusinessSettings(data || [])
+      }
+    } catch (err) {
+      console.error("Error fetching business settings:", err)
+      // Don't show toast for network errors during initial load
+    } finally {
+      setIsLoadingSettings(false)
     }
-    setIsLoadingSettings(false)
   }
 
   useEffect(() => {
@@ -993,6 +1052,311 @@ export function InventoryManagement() {
     }
   }
 
+  const handleExportCSV = async () => {
+    try {
+      const supabase = createBrowserClient()
+
+      // Fetch all devices with their model information
+      const { data: devices, error } = await supabase
+        .from("devices")
+        .select(`
+          *,
+          device_models (
+            name,
+            brand,
+            category
+          )
+        `)
+        .order("created_at", { ascending: false })
+
+      if (error) throw error
+
+      if (!devices || devices.length === 0) {
+        toast({
+          title: "No Data",
+          description: "There are no devices to export.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      // Build headers based on selected columns
+      const headers = exportColumns.filter((col) => selectedExportColumns.includes(col.key)).map((col) => col.label)
+
+      // Map of column keys to device data extractors
+      const columnExtractors: Record<string, (device: any) => string> = {
+        id: (d) => d.id || "",
+        sku: (d) => d.sku || "",
+        serial_number: (d) => d.serial_number || "",
+        name: (d) => d.name || "",
+        brand: (d) => d.brand || "",
+        category: (d) => d.category || "",
+        model_id: (d) => d.model_id || "",
+        model_name: (d) => d.device_models?.name || "",
+        storage: (d) => d.storage || "",
+        color: (d) => d.color || "",
+        condition: (d) => d.condition || "",
+        status: (d) => d.status || "",
+        acquisition_cost_aed: (d) => d.acquisition_cost_aed || "",
+        rrp: (d) => d.rrp || "",
+        depreciation_rate_percent: (d) => d.depreciation_rate_percent || "",
+        refurb_estimate_aed: (d) => d.refurb_estimate_aed || "",
+        price_3mo: (d) => d.price_3mo || "",
+        price_6mo: (d) => d.price_6mo || "",
+        price_12mo: (d) => d.price_12mo || "",
+        price_24mo: (d) => d.price_24mo || "",
+        price_tbyb: (d) => d.price_tbyb || "",
+        Residual_Value_Percent: (d) => d.Residual_Value_Percent || "",
+        accessories: (d) => (d.accessories ? JSON.stringify(d.accessories) : ""),
+        invoice_url: (d) => d.invoice_url || "",
+        notes: (d) => d.notes || "",
+        created_at: (d) => d.created_at || "",
+      }
+
+      // Convert devices to CSV rows with only selected columns
+      const rows = devices.map((device) =>
+        exportColumns
+          .filter((col) => selectedExportColumns.includes(col.key))
+          .map((col) => columnExtractors[col.key](device)),
+      )
+
+      // Create CSV content
+      const csvContent = [
+        headers.join(","),
+        ...rows.map((row) =>
+          row
+            .map((cell) => {
+              // Escape cells that contain commas, quotes, or newlines
+              const cellStr = String(cell)
+              if (cellStr.includes(",") || cellStr.includes('"') || cellStr.includes("\n")) {
+                return `"${cellStr.replace(/"/g, '""')}"`
+              }
+              return cellStr
+            })
+            .join(","),
+        ),
+      ].join("\n")
+
+      // Create blob and download
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
+      const link = document.createElement("a")
+      const url = URL.createObjectURL(blob)
+      link.setAttribute("href", url)
+      link.setAttribute("download", `devices_export_${new Date().toISOString().split("T")[0]}.csv`)
+      link.style.visibility = "hidden"
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+
+      toast({
+        title: "Export Successful",
+        description: `Exported ${devices.length} device(s) with ${selectedExportColumns.length} column(s) to CSV.`,
+      })
+
+      // Close the dialog after successful export
+      setIsExportDialogOpen(false)
+    } catch (error) {
+      console.error("Export error:", error)
+      toast({
+        title: "Export Failed",
+        description: "An error occurred while exporting data.",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const toggleExportColumn = (columnKey: string) => {
+    setSelectedExportColumns((prev) =>
+      prev.includes(columnKey) ? prev.filter((k) => k !== columnKey) : [...prev, columnKey],
+    )
+  }
+
+  const selectAllColumns = () => {
+    setSelectedExportColumns(exportColumns.map((col) => col.key))
+  }
+
+  const deselectAllColumns = () => {
+    setSelectedExportColumns([])
+  }
+
+  const handleImportCSV = async () => {
+    if (!importFile) {
+      toast({
+        title: "No File Selected",
+        description: "Please select a CSV file to import.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsImporting(true)
+
+    try {
+      const text = await importFile.text()
+      const lines = text.split("\n").filter((line) => line.trim())
+
+      if (lines.length < 2) {
+        throw new Error("CSV file is empty or invalid")
+      }
+
+      // Parse CSV header
+      const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""))
+
+      // Parse CSV rows
+      const rows = lines.slice(1).map((line) => {
+        const values: string[] = []
+        let currentValue = ""
+        let insideQuotes = false
+
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i]
+          const nextChar = line[i + 1]
+
+          if (char === '"') {
+            if (insideQuotes && nextChar === '"') {
+              currentValue += '"'
+              i++
+            } else {
+              insideQuotes = !insideQuotes
+            }
+          } else if (char === "," && !insideQuotes) {
+            values.push(currentValue.trim())
+            currentValue = ""
+          } else {
+            currentValue += char
+          }
+        }
+        values.push(currentValue.trim())
+
+        return values
+      })
+
+      const supabase = createBrowserClient()
+      let successCount = 0
+      let errorCount = 0
+
+      // Insert each row into the database
+      for (const row of rows) {
+        const deviceData: any = {}
+
+        headers.forEach((header, index) => {
+          const value = row[index]?.trim()
+          if (!value) return
+
+          // Map CSV columns to database columns
+          switch (header) {
+            case "SKU":
+              deviceData.sku = value
+              break
+            case "Serial Number":
+              deviceData.serial_number = value
+              break
+            case "Name":
+              deviceData.name = value
+              break
+            case "Brand":
+              deviceData.brand = value
+              break
+            case "Category":
+              deviceData.category = value
+              break
+            case "Model ID":
+              deviceData.model_id = value ? Number.parseInt(value) : null
+              break
+            case "Storage":
+              deviceData.storage = value
+              break
+            case "Color":
+              deviceData.color = value
+              break
+            case "Condition":
+              deviceData.condition = value
+              break
+            case "Status":
+              deviceData.status = value
+              break
+            case "Acquisition Cost (AED)":
+              deviceData.acquisition_cost_aed = value ? Number.parseFloat(value) : null
+              break
+            case "RRP":
+              deviceData.rrp = value ? Number.parseFloat(value) : null
+              break
+            case "Depreciation Rate (%)":
+              deviceData.depreciation_rate_percent = value ? Number.parseFloat(value) : null
+              break
+            case "Refurb Estimate (AED)":
+              deviceData.refurb_estimate_aed = value ? Number.parseFloat(value) : null
+              break
+            case "Price 3mo":
+              deviceData.price_3mo = value ? Number.parseFloat(value) : null
+              break
+            case "Price 6mo":
+              deviceData.price_6mo = value ? Number.parseFloat(value) : null
+              break
+            case "Price 12mo":
+              deviceData.price_12mo = value ? Number.parseFloat(value) : null
+              break
+            case "Price 24mo":
+              deviceData.price_24mo = value ? Number.parseFloat(value) : null
+              break
+            case "Price TBYB":
+              deviceData.price_tbyb = value ? Number.parseFloat(value) : null
+              break
+            case "Residual Value (%)":
+              deviceData.Residual_Value_Percent = value ? Number.parseFloat(value) : null
+              break
+            case "Accessories":
+              try {
+                deviceData.accessories = value ? JSON.parse(value) : null
+              } catch {
+                deviceData.accessories = null
+              }
+              break
+            case "Invoice URL":
+              deviceData.invoice_url = value
+              break
+            case "Notes":
+              deviceData.notes = value
+              break
+          }
+        })
+
+        // Skip rows without essential data
+        if (!deviceData.serial_number && !deviceData.name) {
+          continue
+        }
+
+        const { error } = await supabase.from("devices").insert(deviceData)
+
+        if (error) {
+          console.error("Import error for row:", error)
+          errorCount++
+        } else {
+          successCount++
+        }
+      }
+
+      toast({
+        title: "Import Complete",
+        description: `Successfully imported ${successCount} device(s). ${errorCount > 0 ? `${errorCount} failed.` : ""}`,
+      })
+
+      // Refresh devices list
+      fetchDevices()
+      setIsImportDialogOpen(false)
+      setImportFile(null)
+    } catch (error) {
+      console.error("Import error:", error)
+      toast({
+        title: "Import Failed",
+        description: error instanceof Error ? error.message : "An error occurred while importing data.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
   return (
     <div className="space-y-8 pb-8">
       {/* Header */}
@@ -1003,6 +1367,128 @@ export function InventoryManagement() {
           <p className="text-muted-foreground">Track stock levels and warehouse operations</p>
         </div>
         <div className="flex gap-3">
+          <Dialog open={isExportDialogOpen} onOpenChange={setIsExportDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className={cn(ds.button.secondary, "relative overflow-hidden group")}>
+                <Download className="w-4 h-4 mr-2" />
+                Export CSV
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[600px] max-h-[80vh] overflow-hidden flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Download className="w-5 h-5" />
+                  Export Devices to CSV
+                </DialogTitle>
+                <DialogDescription>Select the columns you want to include in the export.</DialogDescription>
+              </DialogHeader>
+
+              <div className="flex-1 overflow-y-auto py-4">
+                <div className="flex gap-2 mb-4">
+                  <Button onClick={selectAllColumns} variant="outline" size="sm" className="text-xs bg-transparent">
+                    Select All
+                  </Button>
+                  <Button onClick={deselectAllColumns} variant="outline" size="sm" className="text-xs bg-transparent">
+                    Deselect All
+                  </Button>
+                  <div className="ml-auto text-sm text-muted-foreground">
+                    {selectedExportColumns.length} of {exportColumns.length} columns selected
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {exportColumns.map((column) => (
+                    <div
+                      key={column.key}
+                      className="flex items-center space-x-2 p-3 rounded-lg border hover:bg-accent/50 transition-colors cursor-pointer"
+                      onClick={() => toggleExportColumn(column.key)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedExportColumns.includes(column.key)}
+                        onChange={() => toggleExportColumn(column.key)}
+                        className="h-4 w-4 rounded border-gray-300 cursor-pointer"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <label className="text-sm font-medium leading-none cursor-pointer flex-1">{column.label}</label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <DialogFooter className="border-t pt-4">
+                <Button
+                  variant="outline"
+                  onClick={() => setIsExportDialogOpen(false)}
+                  className={cn(ds.button.secondary)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleExportCSV}
+                  disabled={selectedExportColumns.length === 0}
+                  className={cn(ds.button.primary)}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export {selectedExportColumns.length > 0 ? `${selectedExportColumns.length} Columns` : ""}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isImportDialogOpen} onOpenChange={setIsImportDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className={cn(ds.button.secondary, "relative overflow-hidden group")}>
+                <Upload className="w-4 h-4 mr-2" />
+                Import CSV
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[500px]">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-semibold">Import Devices</DialogTitle>
+                <DialogDescription>Upload a CSV file to import device data into the database.</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4 py-4">
+                <div className="space-y-2">
+                  <Label htmlFor="csv-file">CSV File</Label>
+                  <Input
+                    id="csv-file"
+                    type="file"
+                    accept=".csv"
+                    onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                    className="rounded-xl"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Upload a CSV file with device information. The file should include headers matching the export
+                    format.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setIsImportDialogOpen(false)
+                    setImportFile(null)
+                  }}
+                  className="rounded-xl"
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleImportCSV} disabled={!importFile || isImporting} className="rounded-xl">
+                  {isImporting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Importing...
+                    </>
+                  ) : (
+                    "Import"
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           {/* Pricing Calculator Dialog */}
           <Dialog
             open={isPricingCalculatorOpen}

@@ -1,7 +1,13 @@
-"use client"
+import { redirect } from "next/navigation"
+import { createClient } from "@/lib/supabase/server"
 
-import DarkStoreDashboard from "../dark-store-dashboard"
+export default async function Page() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
 
-export default function Page() {
-  return <DarkStoreDashboard />
+  if (user) {
+    redirect("/dashboard")
+  } else {
+    redirect("/auth/login")
+  }
 }
