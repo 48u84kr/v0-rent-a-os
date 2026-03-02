@@ -20,6 +20,7 @@ import {
   X,
   Check,
   AlertTriangle,
+  SlidersHorizontal,
 } from "lucide-react"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -50,6 +51,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
 import { createClient } from "@/lib/supabase/client"
 import { useToast } from "@/components/ui/use-toast"
@@ -75,6 +77,11 @@ interface DeviceWithInvestorData extends Device {
   investorReturn: number
   monthlyPayment: number
   totalProfit: number
+}
+
+interface DeviceWithSubscription extends Device {
+  monthly_rate: number
+  subscription_status: string
 }
 
 interface InvestorUser {
@@ -111,10 +118,11 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
   const [isAssignDialogOpen, setIsAssignDialogOpen] = useState(false)
   const [investors, setInvestors] = useState<InvestorUser[]>([])
   const [selectedInvestorId, setSelectedInvestorId] = useState<string>("")
-  const [unassignedDevices, setUnassignedDevices] = useState<Device[]>([])
+  const [availableSubDevices, setAvailableSubDevices] = useState<DeviceWithSubscription[]>([])
+  const [sliderValue, setSliderValue] = useState(0)
   const [selectedAssignDeviceIds, setSelectedAssignDeviceIds] = useState<Set<number>>(new Set())
   const [isAssigning, setIsAssigning] = useState(false)
-  const [assignDialogSearch, setAssignDialogSearch] = useState("")
+  const [isLoadingAvailable, setIsLoadingAvailable] = useState(false)
 
   // Summary stats
   const [totalInvested, setTotalInvested] = useState(0)
@@ -200,18 +208,64 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
     }
   }
 
-  // Admin: fetch unassigned devices for assign dialog
-  const fetchUnassignedDevices = async () => {
-    const supabase = createClient()
-    const { data, error } = await supabase
-      .from("devices")
-      .select("id, name, brand, category, serial_number, storage, color, condition, acquisition_cost_aed, investor_id, investor_paid_status, investor_assigned_at, created_at")
-      .is("investor_id", null)
-      .not("acquisition_cost_aed", "is", null)
-      .order("name")
+  // Admin: fetch unassigned devices that have active subscriptions
+  const fetchAvailableDevices = async () => {
+    setIsLoadingAvailable(true)
+    try {
+      const supabase = createClient()
 
-    if (!error && data) {
-      setUnassignedDevices(data)
+      // First get all active subscriptions with device_id and monthly_rate
+      const { data: subs, error: subError } = await supabase
+        .from("subscriptions")
+        .select("device_id, monthly_rate, status")
+        .eq("status", "active")
+        .not("device_id", "is", null)
+        .not("monthly_rate", "is", null)
+
+      if (subError || !subs || subs.length === 0) {
+        setAvailableSubDevices([])
+        return
+      }
+
+      // Get the device IDs that have active subscriptions
+      const activeDeviceIds = subs.map((s) => s.device_id).filter(Boolean) as number[]
+
+      // Fetch those devices that are NOT yet assigned to an investor
+      const { data: deviceData, error: devError } = await supabase
+        .from("devices")
+        .select("id, name, brand, category, serial_number, storage, color, condition, acquisition_cost_aed, investor_id, investor_paid_status, investor_assigned_at, created_at")
+        .in("id", activeDeviceIds)
+        .is("investor_id", null)
+
+      if (devError || !deviceData) {
+        setAvailableSubDevices([])
+        return
+      }
+
+      // Build a map of device_id -> subscription info
+      const subMap = new Map<number, { monthly_rate: number; status: string }>()
+      for (const s of subs) {
+        if (s.device_id && s.monthly_rate) {
+          subMap.set(s.device_id, { monthly_rate: s.monthly_rate, status: s.status })
+        }
+      }
+
+      // Merge and sort by monthly rate ascending (cheapest first)
+      const merged: DeviceWithSubscription[] = deviceData
+        .filter((d) => subMap.has(d.id))
+        .map((d) => ({
+          ...d,
+          monthly_rate: subMap.get(d.id)!.monthly_rate,
+          subscription_status: subMap.get(d.id)!.status,
+        }))
+        .sort((a, b) => a.monthly_rate - b.monthly_rate)
+
+      setAvailableSubDevices(merged)
+    } catch (err) {
+      console.error("Error fetching available devices:", err)
+      setAvailableSubDevices([])
+    } finally {
+      setIsLoadingAvailable(false)
     }
   }
 
@@ -279,23 +333,41 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
   const openAssignDialog = async () => {
     setSelectedInvestorId("")
     setSelectedAssignDeviceIds(new Set())
-    setAssignDialogSearch("")
+    setSliderValue(0)
     setIsAssignDialogOpen(true)
-    await Promise.all([fetchInvestors(), fetchUnassignedDevices()])
+    await Promise.all([fetchInvestors(), fetchAvailableDevices()])
   }
 
-  // Toggle assign device selection
-  const toggleAssignDevice = (deviceId: number) => {
-    setSelectedAssignDeviceIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(deviceId)) {
-        next.delete(deviceId)
+  // Compute slider min/max from available devices
+  const sliderMin = availableSubDevices.length > 0
+    ? availableSubDevices[0].monthly_rate
+    : 0
+  const sliderMax = availableSubDevices.reduce((sum, d) => sum + d.monthly_rate, 0)
+
+  // When slider value changes, auto-select devices sorted by cheapest first
+  const handleSliderChange = (value: number[]) => {
+    const targetAmount = value[0]
+    setSliderValue(targetAmount)
+
+    let runningTotal = 0
+    const selected = new Set<number>()
+
+    for (const device of availableSubDevices) {
+      if (runningTotal + device.monthly_rate <= targetAmount) {
+        runningTotal += device.monthly_rate
+        selected.add(device.id)
       } else {
-        next.add(deviceId)
+        break
       }
-      return next
-    })
+    }
+
+    setSelectedAssignDeviceIds(selected)
   }
+
+  // Calculate actual selected monthly total
+  const selectedMonthlyTotal = availableSubDevices
+    .filter((d) => selectedAssignDeviceIds.has(d.id))
+    .reduce((sum, d) => sum + d.monthly_rate, 0)
 
   // Confirm assign devices to investor
   const handleConfirmAssign = async () => {
@@ -412,14 +484,10 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
       d.serial_number?.toLowerCase().includes(paidDialogSearch.toLowerCase())
   )
 
-  // Filtered devices for the assign dialog
-  const filteredAssignDialogDevices = unassignedDevices.filter(
-    (d) =>
-      assignDialogSearch === "" ||
-      d.name?.toLowerCase().includes(assignDialogSearch.toLowerCase()) ||
-      d.brand?.toLowerCase().includes(assignDialogSearch.toLowerCase()) ||
-      d.serial_number?.toLowerCase().includes(assignDialogSearch.toLowerCase())
-  )
+  // Compute selected device cost total for assign
+  const selectedDeviceCostTotal = availableSubDevices
+    .filter((d) => selectedAssignDeviceIds.has(d.id))
+    .reduce((sum, d) => sum + (d.acquisition_cost_aed || 0), 0)
 
   const paidCount = devices.filter((d) => d.investor_paid_status === "paid").length
   const unpaidCount = devices.filter((d) => d.investor_paid_status !== "paid").length
@@ -872,15 +940,15 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
         <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <UserPlus className="h-5 w-5" />
+              <SlidersHorizontal className="h-5 w-5" />
               Assign Devices to Investor
             </DialogTitle>
             <DialogDescription>
-              Select an investor and choose devices to assign to their portfolio.
+              Select an investor, then use the slider to set the monthly payment budget. Devices are automatically assigned starting from the lowest monthly rate.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 flex-1 overflow-hidden flex flex-col">
+          <div className="space-y-5 flex-1 overflow-hidden flex flex-col">
             {/* Investor Selection */}
             <div className="space-y-2">
               <Label>Select Investor</Label>
@@ -912,102 +980,121 @@ export function InvestorPortal({ userRole = "investor" }: InvestorPortalProps) {
               )}
             </div>
 
-            {/* Device search */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search unassigned devices..."
-                value={assignDialogSearch}
-                onChange={(e) => setAssignDialogSearch(e.target.value)}
-                className="pl-9"
-              />
-            </div>
+            {isLoadingAvailable ? (
+              <div className="flex-1 flex items-center justify-center">
+                <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : availableSubDevices.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground gap-2 py-8">
+                <Package className="h-8 w-8 opacity-50" />
+                <p className="text-sm">No unassigned devices with active subscriptions available.</p>
+              </div>
+            ) : (
+              <>
+                {/* Slider Section */}
+                <div className="space-y-4 p-4 border rounded-xl bg-muted/30">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">Monthly Payment Budget</Label>
+                    <div className="text-right">
+                      <span className="text-2xl font-bold tabular-nums">{formatCurrency(sliderValue)}</span>
+                      <span className="text-xs text-muted-foreground block">per month</span>
+                    </div>
+                  </div>
 
-            {/* Quick actions */}
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="bg-transparent"
-                onClick={() =>
-                  setSelectedAssignDeviceIds(
-                    new Set(filteredAssignDialogDevices.map((d) => d.id))
-                  )
-                }
-              >
-                Select All
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="bg-transparent"
-                onClick={() => setSelectedAssignDeviceIds(new Set())}
-              >
-                Deselect All
-              </Button>
-              <span className="text-sm text-muted-foreground ml-auto">
-                {selectedAssignDeviceIds.size} selected
-              </span>
-            </div>
+                  <Slider
+                    value={[sliderValue]}
+                    onValueChange={handleSliderChange}
+                    min={0}
+                    max={sliderMax}
+                    step={1}
+                    className="w-full"
+                  />
 
-            {/* Device list */}
-            <div className="flex-1 overflow-y-auto border rounded-lg divide-y min-h-0">
-              {filteredAssignDialogDevices.length === 0 ? (
-                <div className="p-8 text-center text-muted-foreground">
-                  <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  No unassigned devices available
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>{formatCurrency(0)}</span>
+                    {sliderMin > 0 && sliderMin !== sliderMax && (
+                      <span>Min device: {formatCurrency(sliderMin)}</span>
+                    )}
+                    <span>{formatCurrency(sliderMax)}</span>
+                  </div>
+
+                  {/* Summary stats */}
+                  <div className="grid grid-cols-3 gap-3 pt-2 border-t">
+                    <div className="text-center">
+                      <div className="text-lg font-bold tabular-nums">{selectedAssignDeviceIds.size}</div>
+                      <div className="text-xs text-muted-foreground">Devices Selected</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-lg font-bold tabular-nums text-emerald-600">{formatCurrency(selectedMonthlyTotal)}</div>
+                      <div className="text-xs text-muted-foreground">Actual Monthly</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-lg font-bold tabular-nums">{formatCurrency(selectedDeviceCostTotal)}</div>
+                      <div className="text-xs text-muted-foreground">Device Cost</div>
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                filteredAssignDialogDevices.map((device) => {
-                  const isSelected = selectedAssignDeviceIds.has(device.id)
-                  return (
-                    <button
-                      type="button"
-                      key={device.id}
-                      className={cn(
-                        "w-full flex items-center gap-4 p-4 text-left transition-colors hover:bg-muted/50",
-                        isSelected && "bg-blue-50 dark:bg-blue-950/20"
-                      )}
-                      onClick={() => toggleAssignDevice(device.id)}
-                    >
+
+                {/* Device list showing auto-selected devices */}
+                <div className="flex-1 overflow-y-auto border rounded-lg divide-y min-h-0">
+                  {availableSubDevices.map((device) => {
+                    const isSelected = selectedAssignDeviceIds.has(device.id)
+                    return (
                       <div
+                        key={device.id}
                         className={cn(
-                          "w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors",
+                          "flex items-center gap-4 p-3 transition-colors",
                           isSelected
-                            ? "bg-blue-600 border-blue-600"
-                            : "border-muted-foreground/30"
+                            ? "bg-blue-50 dark:bg-blue-950/20"
+                            : "opacity-50"
                         )}
                       >
-                        {isSelected && <Check className="h-4 w-4 text-white" />}
+                        <div
+                          className={cn(
+                            "w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors",
+                            isSelected
+                              ? "bg-blue-600 border-blue-600"
+                              : "border-muted-foreground/30"
+                          )}
+                        >
+                          {isSelected && <Check className="h-3 w-3 text-white" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium text-sm truncate">
+                            {device.name || "Unnamed Device"}
+                          </div>
+                          <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
+                            {device.brand && <span>{device.brand}</span>}
+                            {device.storage && <span>{device.storage}</span>}
+                            {device.serial_number && <span className="hidden sm:inline">SN: {device.serial_number}</span>}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="font-semibold text-sm tabular-nums">
+                            {formatCurrency(device.monthly_rate)}
+                          </div>
+                          <div className="text-xs text-muted-foreground">/month</div>
+                        </div>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "shrink-0 text-xs",
+                            isSelected && "bg-blue-100 text-blue-700 border-blue-200"
+                          )}
+                        >
+                          {isSelected ? "Included" : "Not included"}
+                        </Badge>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">
-                          {device.name || "Unnamed Device"}
-                        </div>
-                        <div className="text-xs text-muted-foreground flex items-center gap-2">
-                          {device.brand && <span>{device.brand}</span>}
-                          {device.serial_number && <span>SN: {device.serial_number}</span>}
-                          {device.storage && <span>{device.storage}</span>}
-                        </div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className="font-medium text-sm">
-                          {formatCurrency(device.acquisition_cost_aed || 0)}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {device.category || "Uncategorized"}
-                        </div>
-                      </div>
-                    </button>
-                  )
-                })
-              )}
-            </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
           </div>
 
           <DialogFooter className="flex-col sm:flex-row gap-2 pt-4 border-t">
             <div className="flex-1 text-sm text-muted-foreground">
-              {selectedAssignDeviceIds.size} device(s) will be assigned
+              {selectedAssignDeviceIds.size} device(s) at {formatCurrency(selectedMonthlyTotal)}/mo will be assigned
             </div>
             <Button
               variant="outline"
